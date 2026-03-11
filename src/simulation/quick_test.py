@@ -34,7 +34,8 @@ try:
         
         step += 1
         if step % 50 == 0:
-            print(f'步骤: {step}, 奖励: {reward:.3f}')
+            reward_val = reward.item() if hasattr(reward, 'item') else float(reward)
+            print(f'步骤: {step}, 奖励: {reward_val:.3f}')
         
         if terminated or truncated:
             print('回合结束，重置环境')
