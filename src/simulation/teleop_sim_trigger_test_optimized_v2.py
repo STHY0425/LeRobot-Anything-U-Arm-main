@@ -362,7 +362,14 @@ class ServoTeleoperatorSimOptimized:
         """Convert pose to action"""
         if self.robot_uids == "rm65b":
             pose_copy = pose.copy()
-            pose_copy.pop(6)
+            pose_copy.pop(6)  # 移除夹爪
+            # 修改旋转方向（哪个关节反了就把哪行注释去掉）
+            # pose_copy[0] = -pose_copy[0]  # 1号舵机反向
+            # pose_copy[1] = -pose_copy[1]  # 2号舵机反向
+            # pose_copy[2] = -pose_copy[2]  # 3号舵机反向
+            pose_copy[3] = -pose_copy[3]  # 4号舵机反向
+            # pose_copy[4] = -pose_copy[4]  # 5号舵机反向
+            # pose_copy[5] = -pose_copy[5]  # 6号舵机反向
             return np.array(pose_copy)
         elif self.robot_uids == "arx-x5":
             action = np.array(pose)
