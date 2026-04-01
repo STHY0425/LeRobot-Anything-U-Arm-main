@@ -1,9 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+瑞尔曼机械臂遥操节点 - 动态零点校准版本
+基于 teleop_sim_trigger_test_optimized_v2.py 的零点校准方案
+
+特性：
+1. 直接读取舵机，不依赖 servo_reader.py
+2. 启动时自动记录当前舵机位置作为零点
+3. 瑞尔曼初始在0点，舵机偏移实时映射
+"""
+
 import rospy
 import numpy as np
 import time
 import serial
+import re
+import threading
+from threading import Thread, Event, Lock
+from queue import Queue, Empty
 from collections import deque
 from std_msgs.msg import Float64MultiArray, Bool, UInt16MultiArray
 from rm_msgs.msg import JointPos, Gripper_Set, Arm_Current_State, Stop
@@ -11,8 +25,7 @@ from rm_msgs.msg import JointPos, Gripper_Set, Arm_Current_State, Stop
 
 class RealManOptimizedTeleop:
     """
-    瑞尔曼机械臂优化遥操节点
-    基于 teleop_sim_trigger_test_optimized_v2.py 的优化方案
+    瑞尔曼机械臂优化遥操节点 - 独立舵机读取版本
     """
     
     # 关节限位
@@ -52,54 +65,54 @@ class RealManOptimizedTeleop:
     
     def __init__(self):
         rospy.init_node("realman_optimized_teleop")
-        rospy.loginfo("[RealManOpt] 启动优化遥操节点...")
+        rospy.loginfo("[RealManOpt] 启动优化遥操节点（动态零点校准版）...")
         
         # ====== 参数配置 ======
         self.arm_model = rospy.get_param("~arm_model", "RM_65")
         self.dof = rospy.get_param("~dof", 6)
         
-        # 零点姿态配置（关键参数）
-        # servo_reader.py 发布的是舵机相对零点的偏移量（度数）
-        # 这里配置瑞尔曼机械臂的对应零点姿态
-        # 
-        # 常用配置：
-        # 1. 直立姿态（全零）: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-        # 2. 标准初始姿态:   [0.0, -20.0, -90.0, 0.0, 90.0, 0.0]
-        # 3. 工作姿态:       [0.0, -45.0, -90.0, 0.0, 45.0, 0.0]
+        # 瑞尔曼初始姿态（全零姿态）
+        # 当舵机偏移为0时，瑞尔曼保持此姿态
         self.init_qpos_deg = rospy.get_param("~init_qpos", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         
-        # 优化参数（新增）
+        # 优化参数
         self.max_joint_speed = rospy.get_param("~max_joint_speed", 30.0)  # 度/秒
         self.publish_rate = rospy.get_param("~publish_rate", 30.0)  # Hz
         self.comm_timeout = rospy.get_param("~comm_timeout", 0.5)  # 通信超时
         
-        # ====== 延迟容错优化参数（从仿真引入）=======
-        self.angle_queue_size = rospy.get_param("~angle_queue_size", 1)  # 只保留最新数据
-        self.prediction_enabled = rospy.get_param("~prediction_enabled", True)  # 启用预测
-        self.filter_alpha = rospy.get_param("~filter_alpha", 0.3)  # 低通滤波系数
-        self.packet_loss_tolerance = rospy.get_param("~packet_loss_tolerance", 3)  # 允许连续丢包数
+        # 延迟容错优化参数
+        self.angle_queue_size = rospy.get_param("~angle_queue_size", 1)
+        self.prediction_enabled = rospy.get_param("~prediction_enabled", True)
+        self.filter_alpha = rospy.get_param("~filter_alpha", 0.3)
+        self.packet_loss_tolerance = rospy.get_param("~packet_loss_tolerance", 3)
         
-        # ====== 舵机主臂控制参数（新增）=======
-        self.enable_servo_control = rospy.get_param("~enable_servo_control", True)  # 是否控制舵机
-        self.servo_serial_port = rospy.get_param("~servo_serial_port", "/dev/ttyUSB0")  # 舵机串口
-        self.servo_baudrate = rospy.get_param("~servo_baudrate", 115200)  # 波特率
-        self.release_torque_on_init = rospy.get_param("~release_torque_on_init", True)  # 启动时释放力矩
+        # 舵机串口参数
+        self.servo_serial_port = rospy.get_param("~servo_serial_port", "/dev/ttyUSB0")
+        self.servo_baudrate = rospy.get_param("~servo_baudrate", 115200)
         
-        # 舵机串口对象（初始化为None）
+        # ====== 初始化舵机串口 ======
         self.servo_ser = None
-        if self.enable_servo_control:
-            self._init_servo_serial()
+        self.zero_angles = [0.0] * 7  # 动态零点（启动时读取）
+        self.current_servo_angles = [0.0] * 7  # 当前舵机角度
+        self._init_servo_serial()
+        
+        # 如果串口打开成功，读取零点
+        if self.servo_ser is not None:
+            self._init_servo_zero_points()
+        else:
+            rospy.logerr("[RealManOpt] 舵机串口未打开，无法继续")
+            raise RuntimeError("舵机串口打开失败")
         
         # ====== 状态变量 ======
         self.target_joint_angles = np.array(self.init_qpos_deg, dtype=np.float32)
         self.last_joint_angles = np.array(self.init_qpos_deg, dtype=np.float32)
-        self.smoothed_angles = np.array(self.init_qpos_deg, dtype=np.float32)  # 平滑后的角度
+        self.smoothed_angles = np.array(self.init_qpos_deg, dtype=np.float32)
         self.gripper_position = 0
-        self.last_gripper_position = 0  # 夹爪速度限制用
+        self.last_gripper_position = 0
         
-        # 预测相关（从仿真引入）
-        self.angle_history = deque(maxlen=5)  # 历史角度用于预测
-        self.velocity_estimate = np.zeros(7)  # 速度估计
+        # 预测相关
+        self.angle_history = deque(maxlen=5)
+        self.velocity_estimate = np.zeros(7)
         self.last_input_time = time.time()
         
         # 丢包容错
@@ -124,7 +137,7 @@ class RealManOptimizedTeleop:
             self.joint_min = np.array([-178, -130, -135, -178, -130, -178][:self.dof])
             self.joint_max = np.array([178, 130, 135, 178, 130, 178][:self.dof])
         
-        # 映射
+        # 映射参数
         self.joint_scale = np.array(rospy.get_param("~joint_scale", [1.0]*6))
         self.joint_invert = np.array(rospy.get_param("~joint_invert", [1.0, 1.0, -1.0, 1.0, 1.0, 1.0]))
         
@@ -133,64 +146,138 @@ class RealManOptimizedTeleop:
         self.gripper_max_deg = 30.0
         self.gripper_range = 1000
         
+        # ====== 线程间通信队列（双线程架构）======
+        self.cmd_queue = Queue(maxsize=1)  # 只保留最新命令，避免延迟
+        self.queue_lock = Lock()  # 队列操作锁
+        self._cleanup_done = False  # 防止重复清理
+        
         # ====== ROS发布者 ======
-        self.joint_pub = rospy.Publisher('/rm_driver/JointPos', JointPos, queue_size=1)  # 改为1减少延迟
+        self.joint_pub = rospy.Publisher('/rm_driver/JointPos', JointPos, queue_size=1)
         self.gripper_pub = rospy.Publisher('/rm_driver/Gripper_Set', Gripper_Set, queue_size=1)
         self.action_pub = rospy.Publisher('/robot_action', Float64MultiArray, queue_size=1)
         self.status_pub = rospy.Publisher('/realman_teleop/status', Bool, queue_size=1)
         self.stop_pub = rospy.Publisher('/rm_driver/Stop', Stop, queue_size=1)
         self.emergency_pub = rospy.Publisher('/realman_teleop/emergency', Bool, queue_size=1)
         
-        # ====== ROS订阅者（优化：使用队列）=======
-        self.angle_buffer = deque(maxlen=self.angle_queue_size)
-        rospy.Subscriber('/servo_angles', Float64MultiArray, self.servo_callback_optimized)
+        # 发布零点信息供调试
+        self.zero_pub = rospy.Publisher('/realman_teleop/zero_angles', Float64MultiArray, queue_size=1, latch=True)
+        zero_msg = Float64MultiArray()
+        zero_msg.data = self.zero_angles
+        self.zero_pub.publish(zero_msg)
+        
+        # ====== ROS订阅者 ======
         rospy.Subscriber('/rm_driver/Arm_Current_State', Arm_Current_State, self.arm_state_callback)
         rospy.Subscriber('/realman_teleop/enable', Bool, self.enable_callback)
         rospy.Subscriber('/realman_teleop/emergency_stop', Bool, self.emergency_callback)
+        rospy.Subscriber('/realman_teleop/release_servos', Bool, self.release_servos_callback)
         
-        # 舵机释放力矩控制
-        if self.enable_servo_control:
-            rospy.Subscriber('/realman_teleop/release_servos', Bool, self.release_servos_callback)
+        # ====== 启动双线程（与仿真文件架构一致）======
+        self.stop_event = Event()
         
-        # ====== 定时器 ======
+        # 线程1: 舵机读取线程（生产者）
+        self.servo_thread = Thread(target=self._servo_read_loop, daemon=True)
+        self.servo_thread.start()
+        rospy.loginfo("[RealManOpt] 舵机读取线程已启动")
+        
+        # 线程2: 命令发布线程（消费者）
+        self.publish_thread = Thread(target=self._command_publish_loop, daemon=True)
+        self.publish_thread.start()
+        rospy.loginfo("[RealManOpt] 命令发布线程已启动")
+        
+        # 安全检查定时器
         rospy.Timer(rospy.Duration(0.1), self.safety_check)
         
         rospy.loginfo(f"[RealManOpt] 机械臂型号: {self.arm_model}, DOF: {self.dof}")
-        rospy.loginfo(f"[RealManOpt] 零点姿态: {self.init_qpos_deg}")
+        rospy.loginfo(f"[RealManOpt] 瑞尔曼零点姿态: {self.init_qpos_deg}")
+        rospy.loginfo(f"[RealManOpt] 舵机零点位置: {[f'{z:.1f}' for z in self.zero_angles]}")
         rospy.loginfo(f"[RealManOpt] 关节缩放: {self.joint_scale}")
         rospy.loginfo(f"[RealManOpt] 关节方向: {self.joint_invert}")
         rospy.loginfo(f"[RealManOpt] 速度限制: {self.max_joint_speed}°/s")
-        rospy.loginfo(f"[RealManOpt] 预测补偿: {'启用' if self.prediction_enabled else '禁用'}")
-        rospy.loginfo(f"[RealManOpt] 滤波系数: {self.filter_alpha}")
-        rospy.loginfo(f"[RealManOpt] 舵机控制: {'启用' if self.enable_servo_control else '禁用'}")
-        if self.enable_servo_control:
-            rospy.loginfo(f"[RealManOpt] 舵机串口: {self.servo_serial_port}:{self.servo_baudrate}")
         rospy.loginfo(f"[RealManOpt] 等待使能信号...")
+        rospy.loginfo(f"[RealManOpt] 提示: 发布 Bool(True) 到 /realman_teleop/enable 使能")
 
-    # ====== 舵机控制方法（新增）=======
+    # ====== 舵机控制方法 ======
     def _init_servo_serial(self):
         """初始化舵机串口连接"""
         try:
             self.servo_ser = serial.Serial(
                 self.servo_serial_port,
                 self.servo_baudrate,
-                timeout=0.1
+                timeout=0.02
             )
             time.sleep(0.1)
             self.servo_ser.reset_input_buffer()
-            rospy.loginfo(f"[Servo] 串口已打开: {self.servo_serial_port}")
-            
-            # 启动时释放力矩（如配置）
-            if self.release_torque_on_init:
-                self._release_servo_torque()
-                
+            rospy.loginfo(f"[Servo] 串口已打开: {self.servo_serial_port} @ {self.servo_baudrate}")
         except serial.SerialException as e:
-            rospy.logwarn(f"[Servo] 无法打开串口 {self.servo_serial_port}: {e}")
-            rospy.logwarn("[Servo] 将继续运行，但无法直接控制舵机")
+            rospy.logerr(f"[Servo] 无法打开串口 {self.servo_serial_port}: {e}")
             self.servo_ser = None
     
+    def _parse_angle(self, response: str) -> float:
+        """解析PWM响应为角度"""
+        match = re.search(r'P(\d{4})', response)
+        if match:
+            pwm = int(match.group(1))
+            return (pwm - 500) / 2000 * 270
+        return None
+    
+    def _read_servo_angle(self, servo_id: int) -> float:
+        """读取单个舵机角度"""
+        if self.servo_ser is None:
+            return None
+        try:
+            self.servo_ser.reset_input_buffer()
+            self.servo_ser.write(f'#{servo_id:03d}PRAD!'.encode('ascii'))
+            time.sleep(0.02)
+            response = self.servo_ser.read_all().decode('ascii', errors='ignore')
+            return self._parse_angle(response)
+        except Exception as e:
+            rospy.logwarn_throttle(1.0, f"[Servo] 读取舵机{servo_id}失败: {e}")
+            return None
+    
+    def _read_all_servos(self) -> list:
+        """读取所有7个舵机角度"""
+        angles = [None] * 7
+        for i in range(7):
+            angles[i] = self._read_servo_angle(i)
+        return angles
+    
+    def _init_servo_zero_points(self):
+        """
+        初始化舵机零点 - 关键功能
+        释放力矩并读取当前位置作为零点
+        """
+        rospy.loginfo("[Servo] 正在初始化舵机零点...")
+        rospy.loginfo("[Servo] 释放力矩，请调整主臂到期望的零点位置...")
+        
+        # 释放所有舵机力矩
+        for i in range(7):
+            try:
+                self.servo_ser.write(f'#{i:03d}PULK!'.encode('ascii'))
+                time.sleep(0.02)
+            except Exception as e:
+                rospy.logwarn(f"[Servo] 释放舵机{i}力矩失败: {e}")
+        
+        # 等待用户调整姿态
+        rospy.loginfo("[Servo] 等待3秒让您调整主臂姿态...")
+        time.sleep(3.0)
+        
+        # 读取当前位置作为零点
+        rospy.loginfo("[Servo] 正在记录零点位置...")
+        for i in range(7):
+            angle = self._read_servo_angle(i)
+            if angle is not None:
+                self.zero_angles[i] = angle
+                rospy.loginfo(f"[Servo] 舵机{i}: 零点 = {angle:.1f}°")
+            else:
+                # 读取失败使用默认值135°
+                self.zero_angles[i] = 135.0
+                rospy.logwarn(f"[Servo] 舵机{i}: 读取失败，使用默认值 135.0°")
+        
+        rospy.loginfo("[Servo] ✅ 零点校准完成！")
+        rospy.loginfo(f"[Servo] 零点角度: {[f'{z:.1f}' for z in self.zero_angles]}")
+    
     def _release_servo_torque(self):
-        """释放所有舵机力矩（PULK命令）"""
+        """释放所有舵机力矩"""
         if self.servo_ser is None:
             rospy.logwarn("[Servo] 串口未打开，无法释放力矩")
             return
@@ -200,73 +287,96 @@ class RealManOptimizedTeleop:
             for i in range(7):
                 cmd = f'#{i:03d}PULK!'.encode('ascii')
                 self.servo_ser.write(cmd)
-                time.sleep(0.01)  # 10ms间隔确保稳定
+                time.sleep(0.01)
             rospy.loginfo("[Servo] ✅ 舵机力矩已释放，可手动调整主臂姿态")
         except Exception as e:
             rospy.logerr(f"[Servo] 释放力矩失败: {e}")
-    
-    def _hold_servo_position(self, servo_id: int, pwm: int, move_time: int = 30):
-        """保持舵机位置（用于锁定状态）"""
-        if self.servo_ser is None:
-            return
-        try:
-            cmd = f'#{servo_id:03d}P{pwm:04d}T{move_time:04d}!'.encode('ascii')
-            self.servo_ser.write(cmd)
-        except Exception as e:
-            rospy.logerr(f"[Servo] 保持位置失败: {e}")
     
     def release_servos_callback(self, msg):
         """ROS回调：释放舵机力矩"""
         if msg.data:
             self._release_servo_torque()
-
-    def release_servos(self):
-        """外部调用：释放舵机力矩"""
-        self._release_servo_torque()
     
     def cleanup(self):
-        """清理资源（关闭串口）"""
-        # 如果机械臂还在使能状态，先失能
-        if self.is_arm_enabled:
-            self.is_arm_enabled = False
-            rospy.loginfo("[RealManOpt] 机械臂已失能")
+        """清理资源 - 防止重复调用"""
+        with self.queue_lock:
+            if self._cleanup_done:
+                return
+            self._cleanup_done = True
+            
+            if self.is_arm_enabled:
+                self.is_arm_enabled = False
+                rospy.loginfo("[RealManOpt] 机械臂已失能")
+        
+        rospy.loginfo("[RealManOpt] 正在清理资源...")
+        
+        # 停止所有线程
+        if hasattr(self, 'stop_event'):
+            self.stop_event.set()
+        
+        # 等待舵机读取线程结束
+        if hasattr(self, 'servo_thread') and self.servo_thread.is_alive():
+            self.servo_thread.join(timeout=2.0)
+            if not self.servo_thread.is_alive():
+                rospy.loginfo("[RealManOpt] 舵机读取线程已停止")
+            else:
+                rospy.logwarn("[RealManOpt] 舵机读取线程停止超时")
+        
+        # 等待发布线程结束
+        if hasattr(self, 'publish_thread') and self.publish_thread.is_alive():
+            self.publish_thread.join(timeout=2.0)
+            if not self.publish_thread.is_alive():
+                rospy.loginfo("[RealManOpt] 命令发布线程已停止")
+            else:
+                rospy.logwarn("[RealManOpt] 命令发布线程停止超时")
         
         # 关闭舵机串口
         if self.servo_ser is not None:
             try:
                 self.servo_ser.close()
                 rospy.loginfo("[Servo] 串口已关闭")
-            except:
-                pass
+            except Exception as e:
+                rospy.logwarn(f"[Servo] 关闭串口时出错: {e}")
         
         rospy.loginfo("[RealManOpt] 节点已安全退出")
 
     def enable_callback(self, msg):
         """使能/失能控制"""
-        if msg.data and not self.is_arm_enabled:
-            self.is_arm_enabled = True
-            self.is_emergency_stopped = False
-            # 重置状态
-            self.angle_history.clear()
-            self.velocity_estimate = np.zeros(7)
-            self.consecutive_packet_loss = 0
-            rospy.loginfo("[RealManOpt] ✅ 机械臂已使能，遥操开始")
-        elif not msg.data and self.is_arm_enabled:
-            self.is_arm_enabled = False
-            rospy.loginfo("[RealManOpt] ⛔ 机械臂已失能")
+        with self.queue_lock:
+            if msg.data and not self.is_arm_enabled:
+                self.is_arm_enabled = True
+                self.is_emergency_stopped = False
+                # 重置状态
+                self.angle_history.clear()
+                self.velocity_estimate = np.zeros(7)
+                self.consecutive_packet_loss = 0
+                # 清空队列
+                try:
+                    while not self.cmd_queue.empty():
+                        self.cmd_queue.get_nowait()
+                except:
+                    pass
+                rospy.loginfo("[RealManOpt] ✅ 机械臂已使能，遥操开始")
+                rospy.loginfo("[RealManOpt] 提示: 移动主臂，从臂将跟随移动")
+            elif not msg.data and self.is_arm_enabled:
+                self.is_arm_enabled = False
+                rospy.loginfo("[RealManOpt] ⛔ 机械臂已失能")
 
     def emergency_callback(self, msg):
         """急停信号处理"""
-        if msg.data and not self.is_emergency_stopped:
-            self.trigger_emergency_stop("外部急停信号触发")
+        with self.queue_lock:
+            if msg.data and not self.is_emergency_stopped:
+                self.trigger_emergency_stop("外部急停信号触发")
 
     def trigger_emergency_stop(self, reason):
         """触发急停"""
-        if self.is_emergency_stopped:
-            return
+        with self.queue_lock:
+            if self.is_emergency_stopped:
+                return
+            
+            self.is_emergency_stopped = True
+            self.is_arm_enabled = False
         
-        self.is_emergency_stopped = True
-        self.is_arm_enabled = False
         rospy.logerr(f"[RealManOpt] 🚨 急停触发！原因: {reason}")
         
         stop_msg = Stop()
@@ -274,52 +384,183 @@ class RealManOptimizedTeleop:
         self.stop_pub.publish(stop_msg)
         self.emergency_pub.publish(Bool(True))
 
-    # ====== 优化1: 使用队列缓冲 + 只保留最新数据 ========
-    def servo_callback_optimized(self, msg):
+    # ====== 线程1: 舵机读取线程（生产者）======
+    def _servo_read_loop(self):
         """
-        优化的伺服角度回调
-        使用队列只保留最新数据，减少延迟累积
+        独立线程读取舵机角度，计算目标位置，放入队列
+        目标频率: 尽可能快（实际受限于读取耗时~7Hz）
         """
-        if not self.is_arm_enabled or self.is_emergency_stopped:
-            return
+        rospy.loginfo("[ServoThread] 舵机读取线程启动")
         
-        if len(msg.data) < 7:
-            rospy.logwarn_throttle(1.0, f"[RealManOpt] 数据长度异常: {len(msg.data)}")
-            return
+        period = 1.0 / self.publish_rate  # 33ms for 30Hz
+        next_time = time.monotonic()
+        frame_count = 0
+        last_print = time.monotonic()
         
-        # 将数据放入队列（自动丢弃旧数据）
-        input_data = list(msg.data)
-        self.angle_buffer.append(input_data)
-        self.last_input_time = time.time()
+        while not self.stop_event.is_set() and not rospy.is_shutdown():
+            loop_start = time.monotonic()
+            
+            # 只有在使能状态下才读取和处理
+            with self.queue_lock:
+                is_enabled = self.is_arm_enabled and not self.is_emergency_stopped
+            
+            if is_enabled:
+                # 读取所有舵机
+                angles = self._read_all_servos()
+                
+                # 检查读取结果（至少要有5个成功）
+                valid_count = sum(1 for a in angles if a is not None)
+                
+                if valid_count >= 5:
+                    # 保存当前角度
+                    self.current_servo_angles = angles
+                    
+                    # 计算偏移量（相对于零点）
+                    angle_offset = [0.0] * 7
+                    for i in range(7):
+                        if angles[i] is not None:
+                            angle_offset[i] = angles[i] - self.zero_angles[i]
+                    
+                    # 处理数据（计算目标角度）
+                    target_angles, gripper_pos = self._process_input_data(angle_offset)
+                    
+                    # 更新状态
+                    with self.queue_lock:
+                        self.last_valid_input = np.array(angle_offset)
+                        self.consecutive_packet_loss = 0
+                        self.last_input_time = time.time()
+                    
+                    # 放入队列（只保留最新，避免延迟累积）
+                    cmd_data = {
+                        'joints': target_angles,
+                        'gripper': gripper_pos
+                    }
+                    try:
+                        # 清空旧数据，只保留最新
+                        while not self.cmd_queue.empty():
+                            self.cmd_queue.get_nowait()
+                        self.cmd_queue.put_nowait(cmd_data)
+                    except:
+                        pass
+                    
+                    frame_count += 1
+                else:
+                    with self.queue_lock:
+                        self.consecutive_packet_loss += 1
+            
+            # 性能统计（每3秒打印一次）
+            now = time.monotonic()
+            if now - last_print > 3.0:
+                with self.queue_lock:
+                    loss_count = self.consecutive_packet_loss
+                actual_fps = frame_count / (now - last_print)
+                rospy.loginfo(f"[ServoThread] 读取频率: {actual_fps:.1f}Hz, 丢包: {loss_count}")
+                frame_count = 0
+                last_print = now
+            
+            # 自适应sleep以维持目标频率
+            next_time += period
+            sleep_dt = next_time - time.monotonic()
+            if sleep_dt > 0:
+                time.sleep(sleep_dt)
+            else:
+                next_time = time.monotonic()
         
-        # 立即处理最新数据（从队列取出）
-        if len(self.angle_buffer) > 0:
-            latest_data = self.angle_buffer[-1]  # 取最新
-            self.angle_buffer.clear()  # 清空队列避免累积
-            self._process_input_data(latest_data)
+        rospy.loginfo("[ServoThread] 舵机读取线程已停止")
+    
+    # ====== 线程2: 命令发布线程（消费者）======
+    def _command_publish_loop(self):
+        """
+        独立线程从队列取数据，发布给机械臂
+        目标频率: 30Hz
+        """
+        rospy.loginfo("[PublishThread] 命令发布线程启动")
+        
+        period = 1.0 / self.publish_rate  # 33ms for 30Hz
+        next_time = time.monotonic()
+        pub_count = 0
+        last_print = time.monotonic()
+        
+        while not self.stop_event.is_set() and not rospy.is_shutdown():
+            # 检查状态
+            with self.queue_lock:
+                is_enabled = self.is_arm_enabled and not self.is_emergency_stopped
+            
+            if is_enabled:
+                # 从队列取最新命令
+                cmd_data = None
+                try:
+                    # 只取最新，清空旧数据
+                    while not self.cmd_queue.empty():
+                        cmd_data = self.cmd_queue.get_nowait()
+                except Empty:
+                    pass
+                
+                # 如果有新命令，处理并发布
+                if cmd_data is not None:
+                    target_angles = cmd_data['joints']
+                    gripper_pos = cmd_data['gripper']
+                    
+                    # 应用速度限制
+                    safe_angles = self._apply_velocity_limit(target_angles)
+                    safe_gripper = self._apply_gripper_velocity_limit(gripper_pos)
+                    
+                    # 发布到ROS
+                    self._publish_to_ros(safe_angles, safe_gripper)
+                    pub_count += 1
+                else:
+                    # 没有新数据，继续发布上一次的速度限制后角度（保持位置）
+                    safe_angles = self._apply_velocity_limit(self.last_joint_angles)
+                    safe_gripper = self._apply_gripper_velocity_limit(self.last_gripper_position)
+                    self._publish_to_ros(safe_angles, safe_gripper)
+            
+            # 性能统计
+            now = time.monotonic()
+            if now - last_print > 3.0:
+                actual_fps = pub_count / (now - last_print)
+                rospy.loginfo(f"[PublishThread] 发布频率: {actual_fps:.1f}Hz")
+                pub_count = 0
+                last_print = now
+            
+            # 维持30Hz
+            next_time += period
+            sleep_dt = next_time - time.monotonic()
+            if sleep_dt > 0:
+                time.sleep(sleep_dt)
+            else:
+                next_time = time.monotonic()
+        
+        rospy.loginfo("[PublishThread] 命令发布线程已停止")
+    
+    def _publish_to_ros(self, joint_angles, gripper_pos):
+        """发布命令到ROS话题"""
+        # 发布关节命令
+        joint_msg = JointPos()
+        joint_msg.joint = joint_angles.tolist() if hasattr(joint_angles, 'tolist') else list(joint_angles)
+        if self.dof > 6:
+            joint_msg.expand = 0.0
+        self.joint_pub.publish(joint_msg)
+        
+        # 发布夹爪命令
+        gripper_msg = Gripper_Set()
+        gripper_msg.position = int(gripper_pos)
+        self.gripper_pub.publish(gripper_msg)
+        
+        # 发布动作反馈
+        action_msg = Float64MultiArray()
+        action_data = list(joint_angles)[:6] + [int(gripper_pos)]
+        action_msg.data = action_data
+        self.action_pub.publish(action_msg)
 
     def _process_input_data(self, angle_offset):
         """
         处理输入数据（带预测补偿和平滑滤波）
-        
-        数据流说明：
-        1. servo_reader.py 读取舵机角度，计算相对零点的偏移量（度数）
-        2. 通过 /servo_angles 话题发布偏移量
-        3. 本节点接收偏移量，映射到瑞尔曼机械臂
+        返回: (target_angles, gripper_position)
         
         映射公式：
             瑞尔曼目标角度 = init_qpos_deg[i] + angle_offset[i] * scale * invert
-        
-        其中：
-            - init_qpos_deg: 瑞尔曼零点姿态（与舵机零点姿态对应）
-            - angle_offset: 舵机相对零点的偏移（度数，来自/servo_angles）
-            - scale/invert: 关节映射系数（处理主从方向差异）
         """
-        current_time = time.time()
-        dt = current_time - self.last_input_time
-        
         # 基本角度计算
-        # new_angles[i] = 瑞尔曼零点 + 舵机偏移量 * 缩放 * 方向
         new_angles = np.array(self.init_qpos_deg, dtype=np.float32)
         for i in range(min(self.dof, 6)):
             offset = angle_offset[i] * self.joint_scale[i] * self.joint_invert[i]
@@ -328,19 +569,18 @@ class RealManOptimizedTeleop:
         # 夹爪（度数直接映射到0-1000范围）
         gripper_deg = angle_offset[6] if len(angle_offset) > 6 else 0
         
-        # ====== 优化2: 预测补偿 ========
+        # 预测补偿
         if self.prediction_enabled and len(self.angle_history) >= 2:
-            # 计算速度
             last_angles = np.array(self.angle_history[-1])
-            velocity = (new_angles - last_angles) / max(dt, 0.001)
+            velocity = (new_angles - last_angles) / max(0.033, 0.001)
             self.velocity_estimate = velocity
             
-            # 预测未来位置（补偿通信延迟约20-30ms）
+            # 预测未来位置
             prediction_time = 0.025  # 25ms
             predicted_angles = new_angles + velocity * prediction_time
             
-            # 限制预测幅度（避免过度预测）
-            max_prediction = 2.0  # 最大预测2度
+            # 限制预测幅度
+            max_prediction = 2.0
             for i in range(self.dof):
                 prediction_delta = predicted_angles[i] - new_angles[i]
                 prediction_delta = np.clip(prediction_delta, -max_prediction, max_prediction)
@@ -349,8 +589,7 @@ class RealManOptimizedTeleop:
         # 保存历史
         self.angle_history.append(new_angles.copy())
         
-        # ====== 优化3: 低通平滑滤波 ========
-        # smoothed = alpha * new + (1-alpha) * old
+        # 低通平滑滤波
         self.smoothed_angles = (
             self.filter_alpha * new_angles + 
             (1 - self.filter_alpha) * self.smoothed_angles
@@ -364,12 +603,11 @@ class RealManOptimizedTeleop:
                 self.smoothed_angles[i] = np.clip(self.smoothed_angles[i], 
                                                    self.joint_min[i], self.joint_max[i])
         
-        self.target_joint_angles = self.smoothed_angles
+        # 更新共享状态（供速度限制使用）
+        self.target_joint_angles = self.smoothed_angles.copy()
         self.gripper_position = self._map_gripper(gripper_deg)
         
-        # 标记为有效数据
-        self.consecutive_packet_loss = 0
-        self.last_valid_input = angle_offset
+        return self.smoothed_angles.copy(), self.gripper_position
 
     def _map_gripper(self, angle_deg):
         """映射夹爪位置"""
@@ -393,26 +631,20 @@ class RealManOptimizedTeleop:
         """安全检查定时器回调"""
         current_time = time.time()
         
-        # 检查输入数据超时（丢包检测）
-        time_since_input = current_time - self.last_input_time
+        with self.queue_lock:
+            is_enabled = self.is_arm_enabled
+            time_since_input = current_time - self.last_input_time
+            loss_count = self.consecutive_packet_loss
+            has_errors = len(self.last_arm_error) > 0
+            errors = self.last_arm_error.copy()
+        
+        # 检查输入数据超时
         if time_since_input > self.comm_timeout:
-            self.consecutive_packet_loss += 1
-            if self.consecutive_packet_loss <= self.packet_loss_tolerance:
-                # 丢包容限内，使用最后有效数据并预测
-                rospy.logwarn_throttle(2.0, 
-                    f"[RealManOpt] 数据延迟: {time_since_input:.2f}s，使用预测值")
-                
-                # 基于速度预测
-                if self.prediction_enabled:
-                    prediction_time = time_since_input
-                    max_prediction = 5.0  # 最大5度
-                    for i in range(self.dof):
-                        predicted_delta = self.velocity_estimate[i] * prediction_time
-                        predicted_delta = np.clip(predicted_delta, -max_prediction, max_prediction)
-                        self.target_joint_angles[i] = self.last_valid_input[i] + predicted_delta
-            else:
-                # 超过容限，触发急停
-                if self.is_arm_enabled:
+            with self.queue_lock:
+                self.consecutive_packet_loss += 1
+                loss_count = self.consecutive_packet_loss
+            if loss_count > self.packet_loss_tolerance:
+                if is_enabled:
                     self.trigger_emergency_stop("数据丢失超过容限")
         
         # 检查状态反馈超时
@@ -422,13 +654,13 @@ class RealManOptimizedTeleop:
                 f"[RealManOpt] 状态反馈超时: {time_since_state:.2f}s")
         
         # 检查严重错误
-        if self.is_arm_enabled and len(self.last_arm_error) > 0:
-            critical_errors = [0x100D, 0x1007, 0x1009, 0x100A]  # 碰撞、超速等
-            if any(err in self.last_arm_error for err in critical_errors):
-                self.trigger_emergency_stop(f"严重错误: {self.last_arm_error}")
+        if is_enabled and has_errors:
+            critical_errors = [0x100D, 0x1007, 0x1009, 0x100A]
+            if any(err in errors for err in critical_errors):
+                self.trigger_emergency_stop(f"严重错误: {errors}")
 
     def _apply_velocity_limit(self, desired_angles):
-        """应用速度限制（带预测的速度限制）"""
+        """应用速度限制"""
         current_time = time.time()
         dt = current_time - self._last_cmd_time
         self._last_cmd_time = current_time
@@ -438,10 +670,8 @@ class RealManOptimizedTeleop:
             self.last_joint_angles = desired_angles.copy()
             return desired_angles
         
-        # 计算最大允许变化量
         max_delta = self.max_joint_speed * dt
         
-        # 限制每个关节的变化
         limited_angles = np.zeros_like(desired_angles)
         for i in range(self.dof):
             delta = desired_angles[i] - self.last_joint_angles[i]
@@ -457,7 +687,7 @@ class RealManOptimizedTeleop:
         dt = current_time - getattr(self, '_last_gripper_time', current_time)
         self._last_gripper_time = current_time
         
-        max_delta = 200.0 * dt  # 200位置/秒
+        max_delta = 200.0 * dt
         delta = desired_pos - self.last_gripper_position
         delta_clipped = int(np.clip(delta, -max_delta, max_delta))
         
@@ -465,48 +695,25 @@ class RealManOptimizedTeleop:
         self.last_gripper_position = limited_pos
         return limited_pos
 
-    def _publish_commands(self):
-        """发布控制命令"""
-        if not self.is_arm_enabled or self.is_emergency_stopped:
-            return
-        
-        # 应用速度限制
-        safe_angles = self._apply_velocity_limit(self.target_joint_angles)
-        safe_gripper = self._apply_gripper_velocity_limit(self.gripper_position)
-        
-        # 发布关节命令
-        joint_msg = JointPos()
-        joint_msg.joint = safe_angles.tolist()
-        if self.dof > 6:
-            joint_msg.expand = 0.0
-        self.joint_pub.publish(joint_msg)
-        
-        # 发布夹爪命令
-        gripper_msg = Gripper_Set()
-        gripper_msg.position = safe_gripper
-        self.gripper_pub.publish(gripper_msg)
-        
-        # 发布动作反馈
-        action_msg = Float64MultiArray()
-        action_data = safe_angles.tolist()[:6] + [safe_gripper]
-        action_msg.data = action_data
-        self.action_pub.publish(action_msg)
-
     def run(self):
-        """主循环"""
-        rate = rospy.Rate(self.publish_rate)
+        """主循环 - 双线程架构下只负责监控和状态发布"""
+        rate = rospy.Rate(10)  # 10Hz状态监控
         
-        rospy.loginfo("[RealManOpt] 优化遥操节点运行中...")
-        rospy.loginfo("[RealManOpt] 提示: 发布 Bool(True) 到 /realman_teleop/enable 使能")
-        rospy.loginfo("[RealManOpt] 提示: 发布 Bool(True) 到 /realman_teleop/release_servos 释放舵机力矩")
+        rospy.loginfo("[RealManOpt] 优化遥操节点运行中（双线程架构）...")
+        rospy.loginfo("[RealManOpt] 舵机读取线程: ~7Hz | 命令发布线程: 30Hz")
         
         while not rospy.is_shutdown():
             try:
-                # 发布状态
-                self.status_pub.publish(Bool(self.is_arm_enabled and not self.is_emergency_stopped))
+                # 发布状态（主线程负责）
+                with self.queue_lock:
+                    status = self.is_arm_enabled and not self.is_emergency_stopped
+                self.status_pub.publish(Bool(status))
                 
-                # 发布控制命令
-                self._publish_commands()
+                # 检查线程健康状态
+                if hasattr(self, 'servo_thread') and not self.servo_thread.is_alive():
+                    rospy.logerr("[RealManOpt] 舵机读取线程异常退出！")
+                if hasattr(self, 'publish_thread') and not self.publish_thread.is_alive():
+                    rospy.logerr("[RealManOpt] 命令发布线程异常退出！")
                 
                 rate.sleep()
                 
@@ -516,28 +723,26 @@ class RealManOptimizedTeleop:
                 rospy.logerr(f"[RealManOpt] 运行时错误: {e}")
                 continue
         
-        # 退出前确保机械臂安全
-        if self.is_arm_enabled:
-            rospy.logwarn("[RealManOpt] 节点退出，自动失能机械臂")
-            self.is_arm_enabled = False
-        
-        # 清理资源
+        # 退出前确保机械臂安全并清理
         self.cleanup()
 
 
 def main():
-    """主函数"""
+    """主函数 - 确保任何情况下都能清理资源"""
     node = None
     try:
         node = RealManOptimizedTeleop()
         node.run()
     except rospy.ROSInterruptException:
-        pass
+        rospy.loginfo("[RealManOpt] 收到中断信号，正在退出...")
     except Exception as e:
-        rospy.logerr(f"[RealManOpt] 节点初始化失败: {e}")
+        rospy.logerr(f"[RealManOpt] 节点异常: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
         if node is not None:
             node.cleanup()
+        rospy.loginfo("[RealManOpt] 主函数结束")
 
 
 if __name__ == "__main__":

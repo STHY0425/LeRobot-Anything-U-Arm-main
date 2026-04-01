@@ -1,6 +1,8 @@
-# 瑞尔曼机械臂 - 完整操作指南
+# 瑞尔曼机械臂 - 完整操作指南（动态零点校准版）
 
-> **快速开始**：按顺序执行 [软件启动流程](#软件启动流程) 的6个步骤即可运行。
+> **快速开始**：按顺序执行 [软件启动流程](#软件启动流程) 的步骤即可运行。
+> 
+> **版本说明**：本版本支持**动态零点校准**，启动时自动记录当前舵机位置作为零点。
 
 ## 目录
 1. [硬件连接](#硬件连接)
@@ -10,7 +12,6 @@
 5. [故障排查](#故障排查)
 
 ---
-roslaunch rm_bringup rm_65_robot.launch
 
 ## 硬件连接
 
@@ -89,14 +90,15 @@ picocom -b 115200 /dev/ttyUSB0
     ↓
 步骤2: 启动瑞尔曼官方驱动 (rm_driver)
     ↓
-步骤3: 启动舵机读取节点 (servo_reader.py)
+步骤3: 启动遥操节点 (realman_teleop_optimized.py)
+    │   └── 自动完成：释放力矩 → 等待调整 → 记录零点
     ↓
-步骤4: 启动遥操节点 (realman_teleop_optimized.py)
+步骤4: 使能遥操作
     ↓
-步骤5: 调整主臂姿态 + 释放力矩
-    ↓
-步骤6: 使能遥操作
+步骤5: 移动主臂，从臂跟随
 ```
+
+> **注意**：本版本**不再需要** `servo_reader.py`，遥操节点直接读取舵机！
 
 ### 步骤1: 启动ROS核心
 
@@ -115,7 +117,7 @@ roslaunch rm_driver rm_65.launch
 # 方法2：如果需要指定IP
 roslaunch rm_driver rm_65.launch robot_ip:=192.168.1.18
 ```
-
+roslaunch rm_bringup rm_65_robot.launch
 **验证驱动启动成功**：
 ```bash
 # 打开终端，检查话题
@@ -132,36 +134,13 @@ rostopic echo /rm_driver/Arm_Current_State
 # 按Ctrl+C退出
 ```
 
-### 步骤3: 启动舵机读取节点
+### 步骤3: 启动遥操节点
 
 ```bash
 # 打开终端3
 cd /home/sthy/2026robotic/LeRobot-Anything-U-Arm-main
 
-# 启动舵机读取节点
-rosrun uarm servo_reader.py
-
-# 或者带参数启动
-rosrun uarm servo_reader.py _baudrate:=115200
-```
-
-**验证舵机读取正常**：
-```bash
-# 打开终端，检查话题
-rrostopic echo /servo_angles
-
-# 应该看到类似输出（7个数值）：
-# data: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-# 移动主臂，数值会变化
-```
-
-### 步骤4: 启动遥操节点
-
-```bash
-# 打开终端4
-cd /home/sthy/2026robotic/LeRobot-Anything-U-Arm-main
-
-# 基本启动（自动释放舵机力矩）
+# 基本启动
 rosrun uarm realman_teleop_optimized.py
 
 # 或带参数启动
@@ -170,39 +149,51 @@ rosrun uarm realman_teleop_optimized.py \
     _joint_invert:="[1.0, 1.0, 1.0, 1.0, 1.0, 1.0]"
 ```
 
+**启动流程说明**：
+1. 打开串口连接舵机
+2. **释放舵机力矩**（可手动调整主臂）
+3. **等待3秒**让你调整主臂到期望的零点姿态
+4. **自动记录**当前舵机位置作为零点
+5. 进入等待使能状态
+
 **启动日志示例**：
 ```
-[RealManOpt] 启动优化遥操节点...
-[Servo] 串口已打开: /dev/ttyUSB0
-[Servo] 正在释放舵机力矩...
-[Servo] ✅ 舵机力矩已释放，可手动调整主臂姿态
+[RealManOpt] 启动优化遥操节点（动态零点校准版）...
+[Servo] 串口已打开: /dev/ttyUSB0 @ 115200
+[Servo] 正在初始化舵机零点...
+[Servo] 释放力矩，请调整主臂到期望的零点位置...
+[Servo] 等待3秒让您调整主臂姿态...
+[Servo] 正在记录零点位置...
+[Servo] 舵机0: 零点 = 142.5°
+[Servo] 舵机1: 零点 = 138.2°
+[Servo] 舵机2: 零点 = 135.0°
+...
+[Servo] ✅ 零点校准完成！
+[Servo] 零点角度: ['142.5', '138.2', '135.0', ...]
 [RealManOpt] 机械臂型号: RM_65, DOF: 6
-[RealManOpt] 零点姿态: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+[RealManOpt] 瑞尔曼零点姿态: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+[RealManOpt] 舵机零点位置: ['142.5', '138.2', '135.0', ...]
 [RealManOpt] 等待使能信号...
+[RealManOpt] 提示: 发布 Bool(True) 到 /realman_teleop/enable 使能
 ```
 
-### 步骤5: 调整主臂姿态
-
-1. **手动调整主臂**：由于力矩已释放，可以直接用手移动主臂到期望的零点姿态
-2. **观察仿真（如果有）**：如果连接了仿真，可以看到主臂姿态
-3. **调整完成后**：准备使能
-
-### 步骤6: 使能遥操作
+### 步骤4: 使能遥操作
 
 ```bash
-# 打开终端5
+# 打开终端4
 
 # 使能遥操作（主从臂开始同步）
 rostopic pub /realman_teleop/enable std_msgs/Bool "data: true"
 
 # 验证使能成功
-rrostopic echo /realman_teleop/status
+rostopic echo /realman_teleop/status
 # 应该显示：data: True
 ```
 
 **此时**：
 - 移动主臂，从臂应该跟随移动
 - 注意从臂速度限制（默认30°/s）
+- 当主臂在零点位置时，从臂保持 `init_qpos` 姿态（默认全0）
 
 ---
 
@@ -212,18 +203,22 @@ rrostopic echo /realman_teleop/status
 
 ```bash
 # 1. 查看当前状态
-rrostopic echo /realman_teleop/status
+rostopic echo /realman_teleop/status
 
 # 2. 查看发送给机械臂的角度
 rostopic echo /rm_driver/JointPos
 
-# 3. 释放舵机力矩（重新调整主臂）
-rostopic pub /realman_teleop/release_servos std_msgs/Bool "data: true"
+# 3. 查看当前记录的零点（调试用）
+rostopic echo /realman_teleop/zero_angles
 
-# 4. 失能遥操作
+# 4. 释放舵机力矩（重新调整主臂零点）
+rostopic pub /realman_teleop/release_servos std_msgs/Bool "data: true"
+# 注意：释放后需要重启节点重新校准零点
+
+# 5. 失能遥操作
 rostopic pub /realman_teleop/enable std_msgs/Bool "data: false"
 
-# 5. 触发急停
+# 6. 触发急停
 rostopic pub /realman_teleop/emergency_stop std_msgs/Bool "data: true"
 ```
 
@@ -243,57 +238,136 @@ rosrun uarm realman_teleop_optimized.py _joint_scale:="[1.0, 1.0, 0.8, 1.0, 1.0,
 
 ## 数据映射说明
 
-### 架构图
+### 架构图（双线程架构）
 
 ```
-┌─────────────────┐      串口       ┌─────────────────┐     ROS话题      ┌─────────────────┐
-│   舵机主臂      │  ───────────→  │  servo_reader   │  ───────────→  │ realman_teleop  │
-│  (中位135°)     │   读取角度      │   (Python)      │  /servo_angles │  (本节点)       │
-└─────────────────┘                └─────────────────┘                └─────────────────┘
-                                                                            ↓
-                                                                     ┌──────────────┐
-                                                                     │  rm_driver   │
-                                                                     │ (官方驱动)   │
-                                                                     └──────────────┘
-                                                                            ↓
-                                                                     ┌──────────────┐
-                                                                     │  瑞尔曼机械臂 │
-                                                                     └──────────────┘
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                         realman_teleop_optimized.py                              │
+│                                                                                  │
+│  ┌──────────────────┐      命令队列(Queue)      ┌──────────────────┐            │
+│  │  舵机读取线程     │  ─────────────────────→  │  命令发布线程     │            │
+│  │  ~7Hz (受限于串口)│   只保留最新目标角度      │  30Hz 稳定输出   │            │
+│  │                  │                         │                  │            │
+│  │ 1. 读取7个舵机   │                         │ 1. 速度限制       │            │
+│  │ 2. 计算偏移量    │                         │ 2. 发布给机械臂   │            │
+│  │ 3. 预测+滤波     │                         │                  │            │
+│  │ 4. 放入队列      │                         │                  │            │
+│  └──────────────────┘                         └──────────────────┘            │
+│         ↑                                              ↓                       │
+│    串口/dev/ttyUSB0                              ROS话题                       │
+│         ↑                                              ↓                       │
+└─────────┼──────────────────────────────────────────────┼───────────────────────┘
+          │                                              │
+┌─────────┴─────────┐                            ┌──────┴──────────┐
+│   舵机主臂        │                            │   rm_driver     │
+│  (任意位置)       │                            │  (官方驱动)     │
+└───────────────────┘                            └─────────────────┘
+                                                          ↓
+                                                 ┌─────────────────┐
+                                                 │  瑞尔曼机械臂    │
+                                                 └─────────────────┘
 ```
 
-### 数据格式说明
+### 与老版本的区别
 
-### `/servo_angles` 话题数据
+| 特性 | 老版本 | 新版本（当前） |
+|------|--------|---------------|
+| 依赖 | 需要 `servo_reader.py` | ✅ **独立运行**，直接读取舵机 |
+| 架构 | 单线程 | ✅ **双线程**：读取线程 + 发布线程 |
+| 零点 | 固定135° | ✅ **动态校准**，启动时记录当前位置 |
+| 延迟 | 可能有累积 | ✅ **队列只保留最新**，避免延迟 |
+| 发布频率 | 与读取频率相同 (~7Hz) | ✅ **独立30Hz**，平滑输出 |
 
-**来源**：`src/uarm/scripts/Uarm_teleop/Zhonglin_servo/servo_reader.py`
+### 双线程工作原理
 
-**计算方式**：
-```python
-# servo_reader.py 第60行
-new_angle = angle - self.zero_angles[i]
+#### 线程1：舵机读取线程（生产者）
+```
+频率: ~7Hz (读取7个舵机约需 7×20ms = 140ms)
+职责:
+  1. 通过串口读取7个舵机当前角度
+  2. 计算相对于 zero_angles 的偏移量
+  3. 应用预测补偿 + 低通滤波
+  4. 将目标角度放入队列 (只保留最新)
 ```
 
-| 变量 | 说明 | 示例值 |
-|------|------|--------|
-| `angle` | 舵机当前绝对角度 | 135° (中位) ~ 270°/0° (极限) |
-| `zero_angles[i]` | 零点标定时的角度 | 约135° (舵机中位) |
-| `new_angle` | 发布的偏移量 | **0°** (直立时) |
+#### 线程2：命令发布线程（消费者）
+```
+频率: 30Hz (33ms周期，稳定输出)
+职责:
+  1. 从队列获取最新目标角度
+  2. 应用速度限制 (默认30°/s)
+  3. 发布到 /rm_driver/JointPos
+  4. 无新数据时保持位置 (速度限制后的角度)
+```
 
-**数据单位**：度数（不是弧度）
+#### 队列机制
+- **类型**: `Queue(maxsize=1)` - 只保留最新命令
+- **作用**: 解耦读取和发布，避免延迟累积
+- **清空策略**: 每次放入新数据前清空旧数据
 
-## 映射公式
+### 零点校准原理
+
+**启动时**：
+1. 释放舵机力矩
+2. 等待3秒让用户调整主臂到期望的零点姿态
+3. 读取当前7个舵机的角度，记录为 `zero_angles`
+
+**运行时**：
+```
+偏移量 = 当前舵机角度 - zero_angles[i]
+瑞尔曼目标角度 = init_qpos_deg[i] + 偏移量 × joint_scale[i] × joint_invert[i]
+```
+
+**举例**：
+- 零点校准时舵机0在 140°
+- 运行时舵机0移动到 150°
+- 偏移量 = 150° - 140° = 10°
+- 瑞尔曼关节0目标 = 0° + 10° = 10°
+
+### 完整数据流
 
 ```
-瑞尔曼目标角度 = init_qpos_deg[i] + servo_angles[i] × joint_scale[i] × joint_invert[i]
+┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│   舵机主臂    │ ──→ │   读取线程    │ ──→ │   命令队列    │ ──→ │   发布线程    │
+│  (当前角度)   │     │  计算偏移量   │     │  目标角度     │     │  速度限制     │
+└──────────────┘     └──────────────┘     └──────────────┘     └──────┬───────┘
+     ↑                                                                 ↓
+     └────────────────────────────────────────────────────────────────┘
+                         反馈控制 (机械臂运动后不影响主臂)
+
+数据转换过程:
+  1. 原始角度: angles[i] (0-270° PWM舵机角度)
+  2. 偏移量: offset = angles[i] - zero_angles[i] (相对零点的度数)
+  3. 目标角度: target = init_qpos_deg[i] + offset × scale × invert
+  4. 速度限制: safe = velocity_limit(target, last, max_speed=30°/s)
+  5. 发布: /rm_driver/JointPos
+```
+
+### 映射公式
+
+```
+瑞尔曼目标角度 = init_qpos_deg[i] + (当前角度 - zero_angles[i]) × joint_scale[i] × joint_invert[i]
 ```
 
 ### 参数说明
 
 | 参数 | 作用 | 默认值 | 说明 |
 |------|------|--------|------|
-| `init_qpos_deg` | 瑞尔曼零点姿态 | `[0,0,0,0,0,0]` | 与舵机零点对应的姿态 |
+| `init_qpos_deg` | 瑞尔曼零点姿态 | `[0,0,0,0,0,0]` | 当舵机偏移为0时的姿态 |
+| `zero_angles` | 舵机零点位置 | **动态读取** | 启动时自动记录 |
 | `joint_scale` | 关节缩放 | `[1,1,1,1,1,1]` | 主从关节比例差异 |
 | `joint_invert` | 关节方向 | `[1,1,1,1,1,1]` | 关节旋转方向反转 |
+
+### 线程性能参数
+
+| 参数 | 默认值 | 说明 | 可调范围 |
+|------|--------|------|----------|
+| `publish_rate` | `30.0` | 发布线程频率 (Hz) | 20-50Hz |
+| `max_joint_speed` | `30.0` | 关节速度限制 (°/s) | 10-50°/s |
+| `filter_alpha` | `0.3` | 滤波系数 | 0.1-1.0 |
+
+> **注意**：舵机读取频率 (~7Hz) 由硬件串口通信时间决定，**不可调**。
+> 读取7个舵机需要约 7×20ms = 140ms，理论最大频率约 7Hz。
 
 ### 常用配置方案
 
@@ -309,8 +383,8 @@ rosrun uarm realman_teleop_optimized.py \
 ```
 
 **效果**：
-- 舵机135°（中位/直立）→ 瑞尔曼 [0,0,0,0,0,0]（直立）
-- 舵机偏移 +10° → 瑞尔曼对应关节 +10°
+- 主臂在校准零点位置 → 从臂 [0,0,0,0,0,0]（直立）
+- 主臂关节0偏移 +10° → 从臂关节0 +10°
 
 #### 方案2：标准初始姿态
 
@@ -322,7 +396,7 @@ rosrun uarm realman_teleop_optimized.py \
 ```
 
 **效果**：
-- 舵机135°（中位）→ 瑞尔曼 [0,-20,-90,0,90,0]（工作姿态）
+- 主臂在校准零点位置 → 从臂 [0,-20,-90,0,90,0]（工作姿态）
 - 适合特定工作场景
 
 #### 方案3：带方向反转
@@ -336,31 +410,43 @@ rosrun uarm realman_teleop_optimized.py \
 
 **效果**：
 - 关节3（索引2）方向反转
-- 舵机 +10° → 瑞尔曼关节3 -10°
+- 主臂 +10° → 从臂关节3 -10°
 
 ## 调试方法
 
-### 1. 查看当前数据
+### 1. 查看线程性能
+
+启动节点后会自动打印线程频率：
+```
+[ServoThread] 读取频率: 7.1Hz, 丢包: 0
+[PublishThread] 发布频率: 30.0Hz
+```
+
+### 2. 查看当前数据
 
 ```bash
-# 终端1：查看舵机偏移量
-rostopic echo /servo_angles
+# 终端1：查看记录的零点
+rostopic echo /realman_teleop/zero_angles
 
 # 终端2：查看瑞尔曼目标角度
 rostopic echo /rm_driver/JointPos
+
+# 终端3：查看遥操状态
+rostopic echo /realman_teleop/status
 ```
 
 ### 2. 零点对齐测试
 
 ```bash
-# 1. 确保主臂处于零点姿态（舵机135°，直立）
-# 2. 启动节点（使用直立零点）
+# 1. 调整主臂到期望的零点姿态
+# 2. 启动节点（会自动记录当前位置为零点）
 rosrun uarm realman_teleop_optimized.py _init_qpos:="[0,0,0,0,0,0]"
 
 # 3. 使能并观察从臂姿态
 rostopic pub /realman_teleop/enable std_msgs/Bool "data: true"
 
-# 4. 如果从臂不是直立，调整 init_qpos 或 joint_invert
+# 4. 此时从臂应该在 init_qpos 姿态
+# 5. 如果从臂不是预期姿态，调整 init_qpos 或 joint_invert
 ```
 
 ### 3. 单关节测试
@@ -371,35 +457,29 @@ rostopic pub /realman_teleop/enable std_msgs/Bool "data: true"
 # 如果比例不对，调整 joint_scale[0]
 ```
 
-## 舵机力矩控制
-
-### 自动释放力矩（启动时）
-
-默认情况下，节点启动时会**自动释放**舵机力矩，让用户可以手动调整主臂姿态：
+### 4. 线程监控
 
 ```bash
-# 启动节点（默认自动释放力矩）
-rosrun uarm realman_teleop_optimized.py
+# 查看线程是否正常运行
+rostopic echo /realman_teleop/status
 
-# 或显式指定
-rosrun uarm realman_teleop_optimized.py _release_torque_on_init:=true
+# 如果显示 data: False，检查：
+# 1. 是否已使能: rostopic pub /realman_teleop/enable std_msgs/Bool "data: true"
+# 2. 是否有错误日志
+# 3. 舵机读取是否正常
 ```
+
+## 舵机力矩控制
 
 ### 运行时释放力矩
 
-在节点运行过程中，可以随时释放舵机力矩：
+在节点运行过程中，可以释放舵机力矩重新调整：
 
 ```bash
 # 释放力矩
 rostopic pub /realman_teleop/release_servos std_msgs/Bool "data: true"
-```
 
-### 禁用舵机控制
-
-如果你不想让这个节点控制舵机（例如由 servo_reader.py 管理）：
-
-```bash
-rosrun uarm realman_teleop_optimized.py _enable_servo_control:=false
+# 调整主臂姿态后，需要重启节点重新校准零点
 ```
 
 ### 修改串口参数
@@ -418,40 +498,38 @@ rosrun uarm realman_teleop_optimized.py \
 # 1. 启动瑞尔曼官方驱动
 roslaunch rm_driver rm_65.launch
 
-# 2. 启动 servo_reader.py（读取舵机角度）
-rosrun uarm servo_reader.py
-
-# 3. 启动优化遥操节点（自动释放舵机力矩）
+# 2. 启动遥操节点（自动完成零点校准）
 rosrun uarm realman_teleop_optimized.py
 
-# 4. 调整主臂姿态后，使能从臂跟随
+# 3. 使能遥操作（主从臂开始同步）
 rostopic pub /realman_teleop/enable std_msgs/Bool "data: true"
 ```
 
 ### 退出阶段（重要！）
 
 ```bash
-# 5. 先将主臂调整到安全/直立姿态
+# 4. 先将主臂调整到安全/直立姿态
 #    （从臂会跟随到对应姿态）
 
-# 6. 失能遥操作
+# 5. 失能遥操作
 rostopic pub /realman_teleop/enable std_msgs/Bool "data: false"
 
-# 7. 等待机械臂稳定后，按 Ctrl+C 退出节点
+# 6. 等待机械臂稳定后，按 Ctrl+C 退出节点
 #    （或关闭终端）
 
-# 8. （可选）使用官方工具将机械臂回到零点
+# 7. （可选）使用官方工具将机械臂回到零点
 #    或使用示教器控制
 ```
 
 ## 注意事项
 
-1. **单位统一**：`/servo_angles` 发布的是度数，瑞尔曼也使用度数
-2. **零点定义**：舵机135°是中位（直立），不是0°
+1. **单位统一**：舵机角度和瑞尔曼都使用度数
+2. **零点定义**：每次启动时动态记录，不是固定的135°
 3. **安全限位**：代码中有 [-178, 178] 等关节限位保护
 4. **速度限制**：默认30°/s，可通过 `max_joint_speed` 调整
-5. **串口冲突**：如果 servo_reader.py 和本节点同时控制舵机，可能产生冲突
-6. **⚠️ 退出警告**：节点退出时机械臂会**停在当前位置**，不会自动回到零点。务必先调整到安全姿态再退出！
+5. **串口独占**：本节点独占舵机串口，不需要 servo_reader.py
+6. **双线程架构**：读取 (~7Hz) 和发布 (30Hz) 是独立线程，通过队列通信
+7. **⚠️ 退出警告**：节点退出时机械臂会**停在当前位置**，不会自动回到零点。务必先调整到安全姿态再退出！
 
 ---
 
@@ -500,11 +578,11 @@ roslaunch rm_driver rm_65.launch --screen
 
 ### 舵机读取问题
 
-#### 问题3：`servo_reader.py` 无法打开串口
+#### 问题3：遥操节点无法打开串口
 
 **现象**：
 ```
-[ERROR] 无法打开串口 /dev/ttyUSB0
+[ERROR] [Servo] 无法打开串口 /dev/ttyUSB0
 ```
 
 **排查步骤**：
@@ -521,22 +599,25 @@ sudo chmod 666 /dev/ttyUSB0
 sudo usermod -a -G dialout $USER
 # 然后重新登录
 
-# 4. 检查串口被占用
+# 4. 检查串口被占用（例如 servo_reader.py 在运行）
 lsof /dev/ttyUSB0
 # 结束占用进程
+# 注意：本版本不再需要 servo_reader.py，请关闭它
 ```
 
-#### 问题4：舵机数据不更新
+#### 问题4：零点校准失败
+
+**现象**：
+```
+[Servo] 舵机X: 读取失败，使用默认值 135.0°
+```
 
 **排查**：
 ```bash
-# 检查话题输出
-rostopic hz /servo_angles
-
-# 如果频率为0，检查
-# 1. 舵机电源是否连接
-# 2. 串口线是否松动
-# 3. 波特率是否匹配（默认115200）
+# 1. 检查舵机电源是否连接
+# 2. 检查串口线是否松动
+# 3. 检查波特率是否匹配（默认115200）
+# 4. 检查舵机控制板是否正常工作
 ```
 
 ### 遥操作问题
@@ -545,18 +626,23 @@ rostopic hz /servo_angles
 
 **排查步骤**：
 ```bash
-# 1. 检查是否收到/servo_angles
-rrostopic echo /servo_angles
+# 1. 检查遥操状态
+rostopic echo /realman_teleop/status
 
 # 2. 检查realman_teleop是否发布控制命令
 rostopic echo /rm_driver/JointPos
 
-# 3. 检查状态
-rostopic echo /realman_teleop/status
-
-# 4. 检查瑞尔曼错误码
+# 3. 检查瑞尔曼错误码
 rostopic echo /rm_driver/Arm_Current_State
 # 查看err字段是否有错误
+
+# 4. 检查零点是否正确记录
+rostopic echo /realman_teleop/zero_angles
+
+# 5. 检查线程是否正常运行（查看日志是否有线程启动信息）
+# 预期输出:
+# [RealManOpt] 舵机读取线程已启动
+# [RealManOpt] 命令发布线程已启动
 ```
 
 #### 问题6：从臂运动方向相反
@@ -596,6 +682,8 @@ ping 192.168.1.18
 | 从臂抖动 | 滤波不够 | 减小 `filter_alpha` |
 | 从臂响应慢 | 速度限制 | 增大 `max_joint_speed` |
 | 数据丢失 | 网络不稳定 | 使用有线连接，增大`packet_loss_tolerance` |
+| 发布频率低于30Hz | 系统负载高 | 关闭其他程序，检查CPU占用 |
+| 读取频率低于7Hz | 串口延迟 | 检查USB线连接，尝试更换USB口 |
 
 ### 紧急处理
 
@@ -634,25 +722,25 @@ tail -f ~/.ros/log/latest/*.log
 |------|------|------|
 | 1 | 终端1 | `roscore` |
 | 2 | 终端2 | `roslaunch rm_driver rm_65.launch` |
-| 3 | 终端3 | `rosrun uarm servo_reader.py` |
-| 4 | 终端4 | `rosrun uarm realman_teleop_optimized.py` |
-| 5 | 终端5 | 手动调整主臂姿态 |
-| 6 | 终端5 | `rostopic pub /realman_teleop/enable std_msgs/Bool "data: true"` |
+| 3 | 终端3 | `rosrun uarm realman_teleop_optimized.py` |
+| 4 | 终端4 | `rostopic pub /realman_teleop/enable std_msgs/Bool "data: true"` |
+
+> **注意**：不再需要启动 `servo_reader.py`！
 
 ### 常用话题速查
 
 | 话题名 | 用途 | 查看命令 |
 |--------|------|----------|
-| `/servo_angles` | 舵机角度偏移 | `rrostopic echo /servo_angles` |
+| `/realman_teleop/zero_angles` | 记录的舵机零点 | `rostopic echo /realman_teleop/zero_angles` |
 | `/rm_driver/JointPos` | 发送给机械臂的角度 | `rostopic echo /rm_driver/JointPos` |
 | `/rm_driver/Arm_Current_State` | 机械臂状态反馈 | `rostopic echo /rm_driver/Arm_Current_State` |
-| `/realman_teleop/status` | 遥操作状态 | `rrostopic echo /realman_teleop/status` |
+| `/realman_teleop/status` | 遥操作状态 | `rostopic echo /realman_teleop/status` |
 
 ### 参数配置速查
 
 | 参数 | 默认值 | 说明 | 示例 |
 |------|--------|------|------|
-| `init_qpos` | `[0,0,0,0,0,0]` | 零点姿态 | `_init_qpos:="[0,-20,-90,0,90,0]"` |
+| `init_qpos` | `[0,0,0,0,0,0]` | 瑞尔曼零点姿态 | `_init_qpos:="[0,-20,-90,0,90,0]"` |
 | `joint_scale` | `[1,1,1,1,1,1]` | 关节缩放 | `_joint_scale:="[1,1,0.8,1,1,1]"` |
 | `joint_invert` | `[1,1,1,1,1,1]` | 关节方向 | `_joint_invert:="[1,1,-1,1,1,1]"` |
 | `filter_alpha` | `0.3` | 滤波系数 | `_filter_alpha:=0.1` |
@@ -736,4 +824,4 @@ sudo usermod -a -G dialout $USER
 
 ---
 
-*文档版本：1.0 | 最后更新：2024年*
+*文档版本：3.0（双线程架构版） | 最后更新：2024年*
