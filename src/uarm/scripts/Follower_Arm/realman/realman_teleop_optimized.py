@@ -63,6 +63,14 @@ class RealManOptimizedTeleop:
         0x1010: "关节掉使能",
     }
     
+    # 舵机数据异常阈值
+    SERVO_PWM_MIN = 400      # PWM最小值
+    SERVO_PWM_MAX = 2600     # PWM最大值
+    SERVO_ANGLE_MIN = 0.0    # 角度最小值(度)
+    SERVO_ANGLE_MAX = 270.0  # 角度最大值(度)
+    SERVO_MAX_DELTA = 30.0   # 单帧最大角度变化(度)
+    SERVO_FAIL_THRESHOLD = 5  # 单个关节连续失败阈值
+    
     def __init__(self):
         rospy.init_node("realman_optimized_teleop")
         rospy.loginfo("[RealManOpt] 启动优化遥操节点（动态零点校准版）...")
@@ -118,6 +126,11 @@ class RealManOptimizedTeleop:
         # 丢包容错
         self.consecutive_packet_loss = 0
         self.last_valid_input = np.zeros(7)
+        
+        # 单个舵机失效追踪
+        self.servo_fail_count = [0] * 7  # 各关节连续失败计数
+        self.servo_last_valid_angle = [None] * 7  # 各关节上次有效角度
+        self.servo_status = [True] * 7  # 各关节当前状态(True=正常)
         
         # 速度限制
         self._last_cmd_time = time.time()
@@ -212,16 +225,27 @@ class RealManOptimizedTeleop:
             rospy.logerr(f"[Servo] 无法打开串口 {self.servo_serial_port}: {e}")
             self.servo_ser = None
     
-    def _parse_angle(self, response: str) -> float:
-        """解析PWM响应为角度"""
+    def _parse_angle(self, response: str, servo_id: int = None) -> float:
+        """解析PWM响应为角度，带范围验证"""
         match = re.search(r'P(\d{4})', response)
         if match:
             pwm = int(match.group(1))
-            return (pwm - 500) / 2000 * 270
+            # PWM范围检查
+            if pwm < self.SERVO_PWM_MIN or pwm > self.SERVO_PWM_MAX:
+                if servo_id is not None:
+                    rospy.logwarn_throttle(1.0, f"[Servo] 舵机{servo_id} PWM值{pwm}超出范围[{self.SERVO_PWM_MIN}, {self.SERVO_PWM_MAX}]")
+                return None
+            angle = (pwm - 500) / 2000 * 270
+            # 角度范围检查
+            if angle < self.SERVO_ANGLE_MIN or angle > self.SERVO_ANGLE_MAX:
+                if servo_id is not None:
+                    rospy.logwarn_throttle(1.0, f"[Servo] 舵机{servo_id} 角度{angle:.1f}°超出范围")
+                return None
+            return angle
         return None
     
     def _read_servo_angle(self, servo_id: int) -> float:
-        """读取单个舵机角度"""
+        """读取单个舵机角度，带跳变检测"""
         if self.servo_ser is None:
             return None
         try:
@@ -229,9 +253,32 @@ class RealManOptimizedTeleop:
             self.servo_ser.write(f'#{servo_id:03d}PRAD!'.encode('ascii'))
             time.sleep(0.02)
             response = self.servo_ser.read_all().decode('ascii', errors='ignore')
-            return self._parse_angle(response)
+            angle = self._parse_angle(response, servo_id)
+            
+            if angle is not None:
+                # 跳变检测：与上次有效角度比较
+                last_angle = self.servo_last_valid_angle[servo_id]
+                if last_angle is not None:
+                    delta = abs(angle - last_angle)
+                    if delta > self.SERVO_MAX_DELTA:
+                        rospy.logwarn(f"[Servo] 舵机{servo_id} 角度跳变: {last_angle:.1f}°→{angle:.1f}° (Δ{delta:.1f}°)，忽略")
+                        return None
+                # 更新状态
+                self.servo_last_valid_angle[servo_id] = angle
+                self.servo_fail_count[servo_id] = 0
+                self.servo_status[servo_id] = True
+            else:
+                # 记录失败
+                self.servo_fail_count[servo_id] += 1
+                if self.servo_fail_count[servo_id] >= self.SERVO_FAIL_THRESHOLD:
+                    if self.servo_status[servo_id]:  # 第一次超过阈值时报警
+                        self.servo_status[servo_id] = False
+                        rospy.logerr(f"[Servo] 舵机{servo_id} 连续失败{self.servo_fail_count[servo_id]}次，标记为异常")
+            
+            return angle
         except Exception as e:
             rospy.logwarn_throttle(1.0, f"[Servo] 读取舵机{servo_id}失败: {e}")
+            self.servo_fail_count[servo_id] += 1
             return None
     
     def _read_all_servos(self) -> list:
@@ -263,15 +310,29 @@ class RealManOptimizedTeleop:
         
         # 读取当前位置作为零点
         rospy.loginfo("[Servo] 正在记录零点位置...")
+        zero_fail_count = 0
         for i in range(7):
-            angle = self._read_servo_angle(i)
+            # 多次尝试读取，确保获取有效值
+            angle = None
+            for attempt in range(3):
+                angle = self._read_servo_angle(i)
+                if angle is not None:
+                    break
+                time.sleep(0.05)
+            
             if angle is not None:
                 self.zero_angles[i] = angle
+                self.servo_last_valid_angle[i] = angle  # 初始化上次有效角度
                 rospy.loginfo(f"[Servo] 舵机{i}: 零点 = {angle:.1f}°")
             else:
                 # 读取失败使用默认值135°
                 self.zero_angles[i] = 135.0
+                self.servo_last_valid_angle[i] = 135.0
+                zero_fail_count += 1
                 rospy.logwarn(f"[Servo] 舵机{i}: 读取失败，使用默认值 135.0°")
+        
+        if zero_fail_count > 2:
+            rospy.logerr(f"[Servo] ⚠️ 警告: {zero_fail_count}个舵机零点读取失败，请检查硬件连接")
         
         rospy.loginfo("[Servo] ✅ 零点校准完成！")
         rospy.loginfo(f"[Servo] 零点角度: {[f'{z:.1f}' for z in self.zero_angles]}")
@@ -344,12 +405,20 @@ class RealManOptimizedTeleop:
         """使能/失能控制"""
         with self.queue_lock:
             if msg.data and not self.is_arm_enabled:
+                # 使能前检查舵机状态
+                failed_servos = [i for i, status in enumerate(self.servo_status) if not status]
+                if failed_servos:
+                    rospy.logerr(f"[RealManOpt] ⚠️ 使能失败: 舵机{failed_servos}处于异常状态")
+                    return
+                
                 self.is_arm_enabled = True
                 self.is_emergency_stopped = False
                 # 重置状态
                 self.angle_history.clear()
                 self.velocity_estimate = np.zeros(7)
                 self.consecutive_packet_loss = 0
+                # 重置舵机失败计数
+                self.servo_fail_count = [0] * 7
                 # 清空队列
                 try:
                     while not self.cmd_queue.empty():
@@ -412,6 +481,14 @@ class RealManOptimizedTeleop:
                 valid_count = sum(1 for a in angles if a is not None)
                 
                 if valid_count >= 5:
+                    # 检查是否有舵机处于持续异常状态
+                    failed_servos = [i for i, status in enumerate(self.servo_status) if not status]
+                    if failed_servos:
+                        rospy.logerr_throttle(1.0, f"[RealManOpt] 舵机{failed_servos}异常，暂停控制")
+                        with self.queue_lock:
+                            self.consecutive_packet_loss += 1
+                        continue
+                    
                     # 保存当前角度
                     self.current_servo_angles = angles
                     
@@ -420,6 +497,11 @@ class RealManOptimizedTeleop:
                     for i in range(7):
                         if angles[i] is not None:
                             angle_offset[i] = angles[i] - self.zero_angles[i]
+                        else:
+                            # 使用上次有效角度计算偏移（保持位置）
+                            if self.servo_last_valid_angle[i] is not None:
+                                angle_offset[i] = self.servo_last_valid_angle[i] - self.zero_angles[i]
+                                rospy.logwarn_throttle(2.0, f"[Servo] 舵机{i} 使用上次有效角度计算偏移")
                     
                     # 处理数据（计算目标角度）
                     target_angles, gripper_pos = self._process_input_data(angle_offset)
@@ -569,10 +651,14 @@ class RealManOptimizedTeleop:
         # 夹爪（度数直接映射到0-1000范围）
         gripper_deg = angle_offset[6] if len(angle_offset) > 6 else 0
         
-        # 预测补偿
+        # 预测补偿（使用实际时间间隔）
         if self.prediction_enabled and len(self.angle_history) >= 2:
             last_angles = np.array(self.angle_history[-1])
-            velocity = (new_angles - last_angles) / max(0.033, 0.001)
+            # 计算实际时间间隔
+            current_time = time.time()
+            dt = max(current_time - self.last_prediction_time, 0.001) if hasattr(self, 'last_prediction_time') else 0.033
+            self.last_prediction_time = current_time
+            velocity = (new_angles - last_angles) / dt
             self.velocity_estimate = velocity
             
             # 预测未来位置
@@ -586,8 +672,10 @@ class RealManOptimizedTeleop:
                 prediction_delta = np.clip(prediction_delta, -max_prediction, max_prediction)
                 new_angles[i] = new_angles[i] + prediction_delta
         
-        # 保存历史
+        # 保存历史和预测时间
         self.angle_history.append(new_angles.copy())
+        if not hasattr(self, 'last_prediction_time'):
+            self.last_prediction_time = time.time()
         
         # 低通平滑滤波
         self.smoothed_angles = (
@@ -660,9 +748,21 @@ class RealManOptimizedTeleop:
                 self.trigger_emergency_stop(f"严重错误: {errors}")
 
     def _apply_velocity_limit(self, desired_angles):
-        """应用速度限制"""
+        """应用速度限制（带时间回拨保护）"""
         current_time = time.time()
         dt = current_time - self._last_cmd_time
+        
+        # 时间回拨检测与保护
+        if dt < 0:
+            rospy.logwarn(f"[RealManOpt] 检测到时间回拨({dt:.3f}s)，使用最小时间间隔")
+            dt = 0.001  # 使用最小安全间隔
+        elif dt > 1.0:
+            # 时间跳跃过大（如程序暂停后恢复）
+            rospy.logwarn(f"[RealManOpt] 检测到时间跳跃({dt:.3f}s)，重置速度限制")
+            self._last_cmd_time = current_time
+            self.last_joint_angles = desired_angles.copy()
+            return desired_angles
+        
         self._last_cmd_time = current_time
         
         if not self._inited_cmd:
@@ -682,9 +782,21 @@ class RealManOptimizedTeleop:
         return limited_angles
 
     def _apply_gripper_velocity_limit(self, desired_pos):
-        """夹爪速度限制"""
+        """夹爪速度限制（带时间回拨保护）"""
         current_time = time.time()
-        dt = current_time - getattr(self, '_last_gripper_time', current_time)
+        last_time = getattr(self, '_last_gripper_time', current_time)
+        dt = current_time - last_time
+        
+        # 时间回拨检测
+        if dt < 0:
+            rospy.logwarn(f"[RealManOpt] 夹爪控制检测到时间回拨({dt:.3f}s)")
+            dt = 0.001
+        elif dt > 1.0:
+            rospy.logwarn(f"[RealManOpt] 夹爪控制检测到时间跳跃({dt:.3f}s)，重置限制")
+            self._last_gripper_time = current_time
+            self.last_gripper_position = desired_pos
+            return desired_pos
+        
         self._last_gripper_time = current_time
         
         max_delta = 200.0 * dt
