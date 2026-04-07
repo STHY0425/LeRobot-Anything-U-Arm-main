@@ -18,7 +18,7 @@ import re
 import threading
 from threading import Thread, Event, Lock
 from queue import Queue, Empty
-from collections import deque
+
 from std_msgs.msg import Float64MultiArray, Bool, UInt16MultiArray
 from rm_msgs.msg import JointPos, Gripper_Set, Arm_Current_State, Stop
 
@@ -90,7 +90,6 @@ class RealManOptimizedTeleop:
         
         # 延迟容错优化参数
         self.angle_queue_size = rospy.get_param("~angle_queue_size", 1)
-        self.prediction_enabled = rospy.get_param("~prediction_enabled", True)
         self.filter_alpha = rospy.get_param("~filter_alpha", 0.3)
         self.packet_loss_tolerance = rospy.get_param("~packet_loss_tolerance", 3)
         
@@ -118,9 +117,6 @@ class RealManOptimizedTeleop:
         self.gripper_position = 0
         self.last_gripper_position = 0
         
-        # 预测相关
-        self.angle_history = deque(maxlen=5)
-        self.velocity_estimate = np.zeros(7)
         self.last_input_time = time.time()
         
         # 丢包容错
@@ -414,8 +410,6 @@ class RealManOptimizedTeleop:
                 self.is_arm_enabled = True
                 self.is_emergency_stopped = False
                 # 重置状态
-                self.angle_history.clear()
-                self.velocity_estimate = np.zeros(7)
                 self.consecutive_packet_loss = 0
                 # 重置舵机失败计数
                 self.servo_fail_count = [0] * 7
@@ -457,7 +451,7 @@ class RealManOptimizedTeleop:
     def _servo_read_loop(self):
         """
         独立线程读取舵机角度，计算目标位置，放入队列
-        目标频率: 尽可能快（实际受限于读取耗时~7Hz）
+        实际频率: ~7Hz（串行读取7个舵机，每个约20ms，总计约140ms）
         """
         rospy.loginfo("[ServoThread] 舵机读取线程启动")
         
@@ -636,7 +630,7 @@ class RealManOptimizedTeleop:
 
     def _process_input_data(self, angle_offset):
         """
-        处理输入数据（带预测补偿和平滑滤波）
+        处理输入数据（平滑滤波）
         返回: (target_angles, gripper_position)
         
         映射公式：
@@ -650,32 +644,6 @@ class RealManOptimizedTeleop:
         
         # 夹爪（度数直接映射到0-1000范围）
         gripper_deg = angle_offset[6] if len(angle_offset) > 6 else 0
-        
-        # 预测补偿（使用实际时间间隔）
-        if self.prediction_enabled and len(self.angle_history) >= 2:
-            last_angles = np.array(self.angle_history[-1])
-            # 计算实际时间间隔
-            current_time = time.time()
-            dt = max(current_time - self.last_prediction_time, 0.001) if hasattr(self, 'last_prediction_time') else 0.033
-            self.last_prediction_time = current_time
-            velocity = (new_angles - last_angles) / dt
-            self.velocity_estimate = velocity
-            
-            # 预测未来位置
-            prediction_time = 0.025  # 25ms
-            predicted_angles = new_angles + velocity * prediction_time
-            
-            # 限制预测幅度
-            max_prediction = 2.0
-            for i in range(self.dof):
-                prediction_delta = predicted_angles[i] - new_angles[i]
-                prediction_delta = np.clip(prediction_delta, -max_prediction, max_prediction)
-                new_angles[i] = new_angles[i] + prediction_delta
-        
-        # 保存历史和预测时间
-        self.angle_history.append(new_angles.copy())
-        if not hasattr(self, 'last_prediction_time'):
-            self.last_prediction_time = time.time()
         
         # 低通平滑滤波
         self.smoothed_angles = (
@@ -812,7 +780,7 @@ class RealManOptimizedTeleop:
         rate = rospy.Rate(10)  # 10Hz状态监控
         
         rospy.loginfo("[RealManOpt] 优化遥操节点运行中（双线程架构）...")
-        rospy.loginfo("[RealManOpt] 舵机读取线程: ~7Hz | 命令发布线程: 30Hz")
+        rospy.loginfo("[RealManOpt] 舵机读取线程: ~7Hz (串行读取7×20ms) | 命令发布线程: 30Hz")
         
         while not rospy.is_shutdown():
             try:
