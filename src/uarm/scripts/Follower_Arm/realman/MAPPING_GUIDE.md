@@ -112,10 +112,13 @@ roscore
 ```bash
 # 打开终端2
 # 方法1：使用launch文件（推荐）
-roslaunch rm_driver rm_65.launch
+需要在catkin_ws目录下运行：
+source ./devel/setup.bash
+（每一个目录都要source）
+roslaunch rm_driver rm_65_driver.launch
 
 # 方法2：如果需要指定IP
-roslaunch rm_driver rm_65.launch robot_ip:=192.168.1.18
+roslaunch rm_driver rm_65_driver.launch robot_ip:=192.168.1.18
 ```
 roslaunch rm_bringup rm_65_robot.launch
 **验证驱动启动成功**：

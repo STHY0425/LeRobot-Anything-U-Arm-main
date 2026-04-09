@@ -103,6 +103,11 @@ class RealManOptimizedTeleop:
         self.current_servo_angles = [0.0] * 7  # 当前舵机角度
         self._init_servo_serial()
         
+        # 单个舵机失效追踪（必须在 _init_servo_zero_points 之前初始化）
+        self.servo_fail_count = [0] * 7  # 各关节连续失败计数
+        self.servo_last_valid_angle = [None] * 7  # 各关节上次有效角度
+        self.servo_status = [True] * 7  # 各关节当前状态(True=正常)
+        
         # 如果串口打开成功，读取零点
         if self.servo_ser is not None:
             self._init_servo_zero_points()
@@ -123,11 +128,6 @@ class RealManOptimizedTeleop:
         self.consecutive_packet_loss = 0
         self.last_valid_input = np.zeros(7)
         
-        # 单个舵机失效追踪
-        self.servo_fail_count = [0] * 7  # 各关节连续失败计数
-        self.servo_last_valid_angle = [None] * 7  # 各关节上次有效角度
-        self.servo_status = [True] * 7  # 各关节当前状态(True=正常)
-        
         # 速度限制
         self._last_cmd_time = time.time()
         self._inited_cmd = False
@@ -147,8 +147,8 @@ class RealManOptimizedTeleop:
             self.joint_max = np.array([178, 130, 135, 178, 130, 178][:self.dof])
         
         # 映射参数
-        self.joint_scale = np.array(rospy.get_param("~joint_scale", [1.0]*6))
-        self.joint_invert = np.array(rospy.get_param("~joint_invert", [1.0, 1.0, -1.0, 1.0, 1.0, 1.0]))
+        self.joint_scale = np.array(rospy.get_param("~joint_scale", [0.03]*6))
+        self.joint_invert = np.array(rospy.get_param("~joint_invert", [1.0, 1.0, 1.0, -1.0, 1.0, 1.0]))
         
         # 夹爪映射
         self.gripper_min_deg = -10.0
