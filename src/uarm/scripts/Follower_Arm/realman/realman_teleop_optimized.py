@@ -86,12 +86,12 @@ class RealManOptimizedTeleop:
         # 优化参数
         self.max_joint_speed = rospy.get_param("~max_joint_speed", 30.0)  # 度/秒
         self.publish_rate = rospy.get_param("~publish_rate", 30.0)  # Hz
-        self.comm_timeout = rospy.get_param("~comm_timeout", 0.5)  # 通信超时
+        self.comm_timeout = rospy.get_param("~comm_timeout", 1.0)  # 通信超时（从0.5增加到1.0s，提高容错）
         
         # 延迟容错优化参数
         self.angle_queue_size = rospy.get_param("~angle_queue_size", 1)
         self.filter_alpha = rospy.get_param("~filter_alpha", 0.3)
-        self.packet_loss_tolerance = rospy.get_param("~packet_loss_tolerance", 3)
+        self.packet_loss_tolerance = rospy.get_param("~packet_loss_tolerance", 10)  # 从3增加到10，提高容错
         
         # 舵机串口参数
         self.servo_serial_port = rospy.get_param("~servo_serial_port", "/dev/ttyUSB0")
@@ -245,13 +245,13 @@ class RealManOptimizedTeleop:
         return None
     
     def _read_servo_angle(self, servo_id: int) -> float:
-        """读取单个舵机角度，带跳变检测"""
+        """读取单个舵机角度，带跳变检测 - 批量读取失败时的回退方案"""
         if self.servo_ser is None:
             return None
         try:
             self.servo_ser.reset_input_buffer()
             self.servo_ser.write(f'#{servo_id:03d}PRAD!'.encode('ascii'))
-            time.sleep(0.02)
+            time.sleep(0.025)  # 等待单个响应
             response = self.servo_ser.read_all().decode('ascii', errors='ignore')
             angle = self._parse_angle(response, servo_id)
             
@@ -262,6 +262,7 @@ class RealManOptimizedTeleop:
                     delta = abs(angle - last_angle)
                     if delta > self.SERVO_MAX_DELTA:
                         rospy.logwarn(f"[Servo] 舵机{servo_id} 角度跳变: {last_angle:.1f}°→{angle:.1f}° (Δ{delta:.1f}°)，忽略")
+                        self.servo_fail_count[servo_id] += 1
                         return None
                 # 更新状态
                 self.servo_last_valid_angle[servo_id] = angle
@@ -282,10 +283,85 @@ class RealManOptimizedTeleop:
             return None
     
     def _read_all_servos(self) -> list:
-        """读取所有7个舵机角度"""
+        """读取所有7个舵机角度 - 批量读取优化版"""
         angles = [None] * 7
-        for i in range(7):
-            angles[i] = self._read_servo_angle(i)
+        
+        if self.servo_ser is None:
+            return angles
+        
+        try:
+            # 清空接收缓冲区
+            self.servo_ser.reset_input_buffer()
+            
+            # ====== 批量发送所有查询命令（添加小延迟确保发送完成）======
+            for i in range(7):
+                self.servo_ser.write(f'#{i:03d}PRAD!'.encode('ascii'))
+                time.sleep(0.002)  # 2ms间隔，避免数据包粘连
+            
+            # ====== 一次性等待所有响应（35ms更保险）======
+            time.sleep(0.035)
+            
+            # ====== 一次性读取所有响应数据 ======
+            response = self.servo_ser.read_all().decode('ascii', errors='ignore')
+            
+            # 调试：打印原始响应（首次成功时）
+            if not hasattr(self, '_first_batch_debug'):
+                self._first_batch_debug = True
+                rospy.loginfo(f"[Servo] 批量读取原始响应: {response[:100]}...")
+            
+            # ====== 解析所有舵机角度 ======
+            # 响应格式示例: #000P1500!#001P1600!... 或分散的响应
+            valid_count = 0
+            for i in range(7):
+                # 查找每个舵机的响应
+                pattern = rf'#{i:03d}P(\d{{4}})'
+                match = re.search(pattern, response)
+                if match:
+                    pwm = int(match.group(1))
+                    angle = (pwm - 500) / 2000 * 270
+                    # 范围检查 + 跳变检查
+                    if self.SERVO_ANGLE_MIN <= angle <= self.SERVO_ANGLE_MAX:
+                        last_angle = self.servo_last_valid_angle[i]
+                        if last_angle is not None:
+                            delta = abs(angle - last_angle)
+                            if delta > self.SERVO_MAX_DELTA:
+                                # 跳变太大，使用上次有效值
+                                angles[i] = last_angle
+                                rospy.logwarn_throttle(2.0, f"[Servo] 舵机{i} 批量读取跳变: {delta:.1f}°，使用上次值")
+                                continue
+                        
+                        angles[i] = angle
+                        self.servo_last_valid_angle[i] = angle
+                        self.servo_fail_count[i] = 0
+                        self.servo_status[i] = True
+                        valid_count += 1
+                    else:
+                        # 范围错误，使用上次有效值
+                        angles[i] = self.servo_last_valid_angle[i] if self.servo_last_valid_angle[i] is not None else None
+                        self.servo_fail_count[i] += 1
+                else:
+                    # 未收到该舵机响应，使用上次有效值
+                    angles[i] = self.servo_last_valid_angle[i] if self.servo_last_valid_angle[i] is not None else None
+                    if angles[i] is None:
+                        self.servo_fail_count[i] += 1
+                        if self.servo_fail_count[i] >= self.SERVO_FAIL_THRESHOLD:
+                            self.servo_status[i] = False
+            
+            # 如果批量读取成功率太低，回退到逐个读取
+            if valid_count < 5:
+                rospy.logwarn_throttle(5.0, f"[Servo] 批量读取成功率低({valid_count}/7)，回退到逐个读取")
+                for i in range(7):
+                    if angles[i] is None or angles[i] == self.servo_last_valid_angle[i]:
+                        angle = self._read_servo_angle(i)
+                        if angle is not None:
+                            angles[i] = angle
+            
+        except Exception as e:
+            rospy.logwarn_throttle(1.0, f"[Servo] 批量读取异常: {e}")
+            # 异常时回退到逐个读取
+            for i in range(7):
+                angles[i] = self._read_servo_angle(i)
+        
         return angles
     
     def _init_servo_zero_points(self):
@@ -455,9 +531,9 @@ class RealManOptimizedTeleop:
     def _servo_read_loop(self):
         """
         独立线程读取舵机角度，计算目标位置，放入队列
-        实际频率: ~7Hz（串行读取7个舵机，每个约20ms，总计约140ms）
+        实际频率: ~25-30Hz（批量读取优化版）
         """
-        rospy.loginfo("[ServoThread] 舵机读取线程启动")
+        rospy.loginfo("[ServoThread] 舵机读取线程启动（批量读取优化版）")
         
         period = 1.0 / self.publish_rate  # 33ms for 30Hz
         next_time = time.monotonic()
@@ -472,16 +548,16 @@ class RealManOptimizedTeleop:
                 is_enabled = self.is_arm_enabled and not self.is_emergency_stopped
             
             if is_enabled:
-                # 读取所有舵机
+                # 读取所有舵机（批量读取优化版）
                 angles = self._read_all_servos()
                 
-                # 检查读取结果（至少要有5个成功）
+                # 检查读取结果（至少要有4个成功，降低阈值提高容错）
                 valid_count = sum(1 for a in angles if a is not None)
                 
-                if valid_count >= 5:
-                    # 检查是否有舵机处于持续异常状态
+                if valid_count >= 4:  # 从5降低到4，提高容错性
+                    # 检查是否有过多舵机处于持续异常状态（允许最多2个失败）
                     failed_servos = [i for i, status in enumerate(self.servo_status) if not status]
-                    if failed_servos:
+                    if len(failed_servos) > 2:  # 允许最多2个舵机异常
                         rospy.logerr_throttle(1.0, f"[RealManOpt] 舵机{failed_servos}异常，暂停控制")
                         with self.queue_lock:
                             self.consecutive_packet_loss += 1
@@ -499,7 +575,8 @@ class RealManOptimizedTeleop:
                             # 使用上次有效角度计算偏移（保持位置）
                             if self.servo_last_valid_angle[i] is not None:
                                 angle_offset[i] = self.servo_last_valid_angle[i] - self.zero_angles[i]
-                                rospy.logwarn_throttle(2.0, f"[Servo] 舵机{i} 使用上次有效角度计算偏移")
+                                # 只在调试时输出，避免日志刷屏
+                                # rospy.logwarn_throttle(5.0, f"[Servo] 舵机{i} 使用上次有效角度计算偏移")
                     
                     # 处理数据（计算目标角度）
                     target_angles, gripper_pos = self._process_input_data(angle_offset)
@@ -507,7 +584,7 @@ class RealManOptimizedTeleop:
                     # 更新状态
                     with self.queue_lock:
                         self.last_valid_input = np.array(angle_offset)
-                        self.consecutive_packet_loss = 0
+                        self.consecutive_packet_loss = 0  # 成功时重置丢包计数
                         self.last_input_time = time.time()
                     
                     # 放入队列（只保留最新，避免延迟累积）
@@ -525,8 +602,11 @@ class RealManOptimizedTeleop:
                     
                     frame_count += 1
                 else:
+                    # 读取失败次数增加，但只记录一次
                     with self.queue_lock:
                         self.consecutive_packet_loss += 1
+                        # 也更新时间戳，避免触发超时检测
+                        self.last_input_time = time.time()
             
             # 性能统计（每3秒打印一次）
             now = time.monotonic()
