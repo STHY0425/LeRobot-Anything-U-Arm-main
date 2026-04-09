@@ -146,10 +146,14 @@ class RealManOptimizedTeleop:
             self.joint_min = np.array([-178, -130, -135, -178, -130, -178][:self.dof])
             self.joint_max = np.array([178, 130, 135, 178, 130, 178][:self.dof])
         
-        # 映射参数
-        self.joint_scale = np.array(rospy.get_param("~joint_scale", [0.03]*6))
+        # 映射参数（Version1测试机械臂参数）
+        self.joint_scale = np.array(rospy.get_param("~joint_scale", [0.015]*6))
         self.joint_invert = np.array(rospy.get_param("~joint_invert", [1.0, 1.0, 1.0, -1.0, 1.0, 1.0]))
-        
+
+        # # 映射参数（模块化控制预留）
+        # self.joint_scale = np.array(rospy.get_param("~joint_scale", [0.03]*6))
+        # self.joint_invert = np.array(rospy.get_param("~joint_invert", [1.0, 1.0, 1.0, -1.0, 1.0, 1.0]))
+
         # 夹爪映射
         self.gripper_min_deg = -10.0
         self.gripper_max_deg = 30.0

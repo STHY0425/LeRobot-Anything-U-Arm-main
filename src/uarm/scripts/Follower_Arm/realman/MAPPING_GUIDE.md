@@ -36,16 +36,16 @@
    - **无线**：机械臂连接WiFi，确保和电脑在同一网络
 
 #### 1.2 网络配置
-机械臂默认IP地址通常是 `192.168.1.18`，确保电脑能ping通：
-
+1. **进入有线连接网络配置**：在IPV4界面点击手动选项
+![alt text](image-1.png)
+2. **网络地址设置**：
+   - **地址**：192.168.1.10
+   - **子网掩码**：255.255.255.0
+   - **网关**：192.168.1.1
+3. **睿尔曼官方示教育器**：打开网址：http://192.168.1.18/#/
 ```bash
 # 检查网络连接
 ping 192.168.1.18
-
-# 如果不通，检查网络配置
-# 有线连接时，可能需要设置电脑IP为同一网段
-sudo ifconfig eth0 192.168.1.100 netmask 255.255.255.0
-```
 
 #### 1.3 验证机械臂状态
 机械臂上电后，听到"滴"声表示启动完成。观察指示灯：
@@ -117,11 +117,8 @@ source ./devel/setup.bash
 （每一个目录都要source）
 roslaunch rm_driver rm_65_driver.launch
 
-# 方法2：如果需要指定IP
-roslaunch rm_driver rm_65_driver.launch robot_ip:=192.168.1.18
-```
-roslaunch rm_bringup rm_65_robot.launch
-**验证驱动启动成功**：
+
+
 ```bash
 # 打开终端，检查话题
 rostopic list | grep rm_driver
