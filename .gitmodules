@@ -1,0 +1,3 @@
+[submodule "src/uarm/scripts/Follower_Arm/realman/catkin_ws/src/rm_robot"]
+	path = src/uarm/scripts/Follower_Arm/realman/catkin_ws/src/rm_robot
+	url = https://github.com/RealManRobot/rm_robot.git
