@@ -57,6 +57,7 @@ realman/
 ```bash
 rosrun uarm servo_reader.py
 ```
+roslaunch rm_driver rm_65_driver.launch
 
 **终端2 - 启动 RealMan 控制节点：**
 ```bash
