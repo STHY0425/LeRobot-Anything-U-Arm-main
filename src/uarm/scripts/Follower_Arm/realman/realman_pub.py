@@ -1,10 +1,3 @@
-#!/usr/bin/env python3
-"""
-RealMan 机械臂状态发布节点
-功能：读取 RealMan 关节状态并发布到 /robot_state 话题
-架构：参考 xarm_pub.py 的简洁设计
-"""
-
 import rospy
 import numpy as np
 from std_msgs.msg import Float64MultiArray

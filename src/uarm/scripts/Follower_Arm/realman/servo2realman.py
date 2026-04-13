@@ -20,7 +20,7 @@ class ServoToRealMan:
         
         # ====== 参数配置 ======
         self.dof = rospy.get_param("~dof", 6)
-        self.control_rate = rospy.get_param("~control_rate", 20.0)  # Hz
+        self.control_rate = rospy.get_param("~control_rate", 1000.0)  # Hz
         self.max_joint_speed = rospy.get_param("~max_joint_speed", 30.0)  # 度/秒
         
         # RealMan 初始姿态（零点姿态）
