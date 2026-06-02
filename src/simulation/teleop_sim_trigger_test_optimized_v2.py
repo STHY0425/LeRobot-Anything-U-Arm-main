@@ -45,6 +45,7 @@ class ServoTeleoperatorSimOptimized:
         self.scene = scene
         self.robot_uids = robot_uids
         self.zero_angles = [0.0] * 7
+        self.last_valid_angles = [0.0] * 7
         self.stop_event = Event()
         self.rate = 30.0  # 提高到30Hz
         self.arm_pos_queue = Queue(maxsize=1)  # 只保留最新数据
@@ -213,7 +214,10 @@ class ServoTeleoperatorSimOptimized:
             if read_ok:
                 # 转换为相对角度
                 for i in range(7):
-                    arm_pos[i] = np.radians(angles[i] - self.zero_angles[i])
+                    if angles[i] is not None:
+                        self.last_valid_angles[i] = angles[i]
+                    current_angle = self.last_valid_angles[i]
+                    arm_pos[i] = np.radians(current_angle - self.zero_angles[i])
                 
                 # 更新队列 (只保留最新)
                 try:
@@ -235,7 +239,7 @@ class ServoTeleoperatorSimOptimized:
                 
                 # Trigger检测 (使用舵机6的绝对角度)
                 if self.trigger_enabled and state == 'teaching':
-                    servo6_abs = angles[6] if angles[6] is not None else self.zero_angles[6]
+                    servo6_abs = angles[6] if angles[6] is not None else self.last_valid_angles[6]
                     if servo6_abs is not None:
                         if abs(servo6_abs - self.trigger_angle) < self.trigger_tolerance:
                             print(f"\n\n[TRIGGER] *** TRIGGERED at {servo6_abs:.1f}° ***")
@@ -261,10 +265,11 @@ class ServoTeleoperatorSimOptimized:
         locked_pwm = []
         for i in range(7):
             if angles[i] is not None:
+                self.last_valid_angles[i] = angles[i]
                 pwm = self._angle_to_pwm(angles[i])
                 locked_pwm.append(pwm)
             else:
-                locked_pwm.append(self._angle_to_pwm(self.zero_angles[i]))
+                locked_pwm.append(self._angle_to_pwm(self.last_valid_angles[i]))
         
         with self.lock:
             self.locked_positions = locked_pwm
