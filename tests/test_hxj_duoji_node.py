@@ -1,3 +1,4 @@
+import ast
 import unittest
 
 import hxj_duoji_node as node
@@ -66,6 +67,23 @@ class HxjDuojiNodeTest(unittest.TestCase):
         node.run_state_machine_once(None, {}, shared_state, lock)
 
         self.assertEqual(shared_state["control_state"], node.STATE_ERROR)
+
+    def test_function_summaries_are_above_def_lines(self):
+        source_path = "hxj_duoji_node.py"
+        with open(source_path, "r", encoding="utf-8") as file_obj:
+            source_text = file_obj.read()
+        source_lines = source_text.splitlines()
+        tree = ast.parse(source_text)
+
+        for item in tree.body:
+            if not isinstance(item, ast.FunctionDef):
+                continue
+            self.assertIsNone(ast.get_docstring(item))
+            previous_line = source_lines[item.lineno - 2].strip()
+            self.assertTrue(
+                previous_line.startswith("#"),
+                msg="函数 %s 上方缺少 # 摘要注释" % item.name,
+            )
 
 
 if __name__ == "__main__":

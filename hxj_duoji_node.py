@@ -26,15 +26,8 @@ STATE_HOLD = "HOLD"        # 保持：预留给位置保持或锁定
 STATE_ERROR = "ERROR"      # 错误：预留给停机、释放、等待人工处理
 
 
+# 解析 ROS 参数里的整数列表，支持数字、列表和 "[0,1,2]" 字符串。
 def parse_int_list(raw_value):
-    """解析 ROS 参数里的整数列表。
-
-    支持三种常见形式：
-    - 直接传单个数字，例如 3
-    - Python 列表，例如 [0, 1, 2]
-    - 字符串列表，例如 "[0,1,2]"
-    """
-
     # ROS 参数有时会从 launch 文件里以字符串形式传进来，比如 "[0,1,2]"。
     # 这里集中解析，后面的代码只处理真正的 int 列表。
     if raw_value is None:
@@ -59,24 +52,18 @@ def parse_int_list(raw_value):
     return result
 
 
+# 安全读取对象属性，同时兼容对象和字典。
 def get_attr(obj, name, default_value):
-    """安全读取对象属性。
-
-    官方 SDK 的同步监控数据可能是对象，也可能随版本变化成字典。
-    这里做一个很薄的兼容层，避免状态机代码关心这些细节。
-    """
-
+    # 官方 SDK 的同步监控数据可能是对象，也可能随版本变化成字典。
+    # 这里做一个很薄的兼容层，避免状态机代码关心这些细节。
     if isinstance(obj, dict):
         return obj.get(name, default_value)
     return getattr(obj, name, default_value)
 
 
+# 把官方同步监控数据转换成普通字典，供共享状态和状态机使用。
 def build_servo_state(servo_id, monitor_data):
-    """把官方同步监控数据转换成普通字典。
-
-    字段保持简单，后续控制状态机直接读这些 key。
-    """
-
+    # 字段保持简单，后续控制状态机直接读这些 key。
     # 官方同步监控示例里角度字段是 angle_monitor。
     # 这里额外兼容 angle，是为了不同 SDK 版本字段名变化时更容易跑起来。
     angle = get_attr(monitor_data, "angle_monitor", None)
@@ -96,9 +83,8 @@ def build_servo_state(servo_id, monitor_data):
     }
 
 
+# 从官方 SDK 管理器缓存里取单个舵机对象。
 def get_servo_from_manager(manager, servo_id):
-    """从官方 SDK 管理器缓存里取单个舵机对象。"""
-
     if not hasattr(manager, "servos"):
         return None
 
@@ -114,9 +100,8 @@ def get_servo_from_manager(manager, servo_id):
         return None
 
 
+# 创建线程之间共享的状态字典。
 def create_shared_state(servo_ids, num_servos):
-    """创建线程之间共享的状态字典。"""
-
     # shared_state 是 ROS 线程和控制线程之间唯一共享的数据。
     # 访问它时必须配合 state_lock，避免一个线程读到另一个线程写到一半的数据。
     servos = {}
@@ -143,13 +128,10 @@ def create_shared_state(servo_ids, num_servos):
     }
 
 
+# 生成 /servo_angles 话题需要的数组。
 def make_angle_array(shared_state):
-    """生成 /servo_angles 话题需要的数组。
-
-    数组下标仍然对应舵机 ID。没有数据的位置填 0。
-    当前版本不做零点标定，直接发布同步读取到的角度。
-    """
-
+    # 数组下标仍然对应舵机 ID。没有数据的位置填 0。
+    # 当前版本不做零点标定，直接发布同步读取到的角度。
     # ROS 的 Float64MultiArray 是数组，不是 dict。
     # 为了和原工程保持一致，数组下标仍然直接使用舵机 ID。
     data = []
@@ -164,9 +146,8 @@ def make_angle_array(shared_state):
     return data
 
 
+# 生成 /servo_currents 话题需要的数组。
 def make_current_array(shared_state):
-    """生成 /servo_currents 话题需要的数组。"""
-
     data = []
     for _ in range(shared_state["num_servos"]):
         data.append(0.0)
@@ -177,12 +158,9 @@ def make_current_array(shared_state):
     return data
 
 
+# 读取 ROS 参数并整理成普通字典。
 def read_ros_config(rospy):
-    """读取 ROS 参数。
-
-    这里返回普通字典，不额外拆类，后续想改参数名也比较直观。
-    """
-
+    # 这里返回普通字典，不额外拆类，后续想改参数名也比较直观。
     # 这里只读取当前框架真正需要的参数。
     # 旧工程里的 URDF、重力补偿、关节方向等参数已经故意移除。
     servo_ids = parse_int_list(rospy.get_param("~servo_ids", [0, 1, 2, 3, 4, 5, 6]))
@@ -202,9 +180,8 @@ def read_ros_config(rospy):
     }
 
 
+# 打开串口并创建官方 SDK 管理器。
 def open_servo_manager(config):
-    """打开串口并创建官方 SDK 管理器。"""
-
     # 串口和 SDK 延迟导入，方便 Windows 上做纯 Python 测试。
     # 真正运行 ROS 节点时，控制线程会调用这里。
     import serial
@@ -222,13 +199,10 @@ def open_servo_manager(config):
     return uart, manager
 
 
+# 使用官方同步读取 API 读取一组舵机状态。
 def read_sync_monitor(manager, servo_ids):
-    """使用官方同步读取 API 读取一组舵机状态。
-
-    官方示例调用后从 manager.servos[id] 取数据。官方文档也描述该 API 会返回
-    同步监控数据，所以这里同时兼容返回值和 manager.servos 两种形式。
-    """
-
+    # 官方示例调用后从 manager.servos[id] 取数据。官方文档也描述该 API 会返回
+    # 同步监控数据，所以这里同时兼容返回值和 manager.servos 两种形式。
     # 这是本工程读取舵机状态的主路径：
     # 一次同步读取多个舵机，避免逐个 query_servo_angle/query_current。
     result = manager.send_sync_servo_monitor(servo_ids)
@@ -268,9 +242,8 @@ def read_sync_monitor(manager, servo_ids):
     return states
 
 
+# 把控制线程读到的舵机状态写入共享状态。
 def update_shared_servo_state(shared_state, state_lock, new_states):
-    """把控制线程读到的舵机状态写入共享状态。"""
-
     # 不使用 with state_lock 是为了让代码对 Python 初学者更直观：
     # acquire() 和 release() 成对出现，finally 保证异常时也会释放锁。
     state_lock.acquire()
@@ -282,9 +255,8 @@ def update_shared_servo_state(shared_state, state_lock, new_states):
         state_lock.release()
 
 
+# 切换控制状态机状态。
 def set_control_state(shared_state, state_lock, new_state):
-    """切换控制状态机状态。"""
-
     state_lock.acquire()
     try:
         shared_state["control_state"] = new_state
@@ -292,9 +264,8 @@ def set_control_state(shared_state, state_lock, new_state):
         state_lock.release()
 
 
+# 复制一份共享状态给 ROS 线程读取。
 def copy_shared_state(shared_state, state_lock):
-    """复制一份共享状态给 ROS 线程读取。"""
-
     # ROS 线程发布前先复制一份快照，复制完成就释放锁。
     # 这样发布话题不会长期占用锁，也不会阻塞控制线程读舵机。
     state_lock.acquire()
@@ -314,63 +285,44 @@ def copy_shared_state(shared_state, state_lock):
         state_lock.release()
 
 
+# 空闲状态处理：当前不下发舵机命令。
 def handle_idle(manager, config, shared_state, state_lock):
-    """空闲状态。
-
-    这里暂时不下发舵机命令。后续可以在这里处理待机、安全释放等逻辑。
-    """
-
+    # 后续可以在这里处理待机、安全释放等逻辑。
     return
 
 
+# 手动控制状态处理：预留给单关节调试或手动目标角。
 def handle_manual(manager, config, shared_state, state_lock):
-    """手动控制状态。
-
-    后续可以从命令队列取单个舵机目标角，并调用 set_servo_angle。
-    """
-
+    # 后续可以从命令队列取单个舵机目标角，并调用 set_servo_angle。
     return
 
 
+# 规划状态处理：预留给机械臂逆解或轨迹准备。
 def handle_plan(manager, config, shared_state, state_lock):
-    """规划状态。
-
-    这里保留机械臂逆解或轨迹准备入口，当前不做具体计算。
-    """
-
+    # 这里保留机械臂逆解或轨迹准备入口，当前不做具体计算。
     return
 
 
+# 运动执行状态处理：预留给正式运动控制。
 def handle_move(manager, config, shared_state, state_lock):
-    """运动执行状态。
-
-    后续根据规划结果选择控制方案，并下发舵机角度命令。
-    """
-
+    # 后续根据规划结果选择控制方案，并下发舵机角度命令。
     return
 
 
+# 保持状态处理：预留给位置保持或锁定当前位置。
 def handle_hold(manager, config, shared_state, state_lock):
-    """保持状态。
-
-    后续可以锁定当前位置，或周期性修正目标角。
-    """
-
+    # 后续可以锁定当前位置，或周期性修正目标角。
     return
 
 
+# 错误保护状态处理：预留给停机、释放或等待人工复位。
 def handle_error(manager, config, shared_state, state_lock):
-    """错误保护状态。
-
-    后续可以在这里释放舵机、停止运动或等待人工复位。
-    """
-
+    # 后续可以在这里释放舵机、停止运动或等待人工复位。
     return
 
 
+# 执行一次控制状态机分发。
 def run_state_machine_once(manager, config, shared_state, state_lock):
-    """执行一次控制状态机。"""
-
     # 先把当前状态读出来，再释放锁。
     # 各状态处理函数如果需要读写共享状态，会自己加锁。
     state_lock.acquire()
@@ -396,9 +348,8 @@ def run_state_machine_once(manager, config, shared_state, state_lock):
         set_control_state(shared_state, state_lock, STATE_ERROR)
 
 
+# 释放所有舵机。
 def release_servos(manager, servo_ids):
-    """释放所有舵机。"""
-
     # method=0x10, power=0 来自官方示例，含义是停止并释放控制。
     for servo_id in servo_ids:
         try:
@@ -407,12 +358,8 @@ def release_servos(manager, servo_ids):
             pass
 
 
+# 控制线程入口，本线程是唯一访问舵机 SDK 的线程。
 def control_thread_main(config, shared_state, state_lock, stop_event, rospy):
-    """控制线程入口。
-
-    本线程是唯一访问舵机 SDK 的线程。
-    """
-
     # 控制线程是唯一访问 UartServoManager 的线程。
     # ROS 线程只读 shared_state，不碰串口，避免串口读写交叉。
     uart = None
@@ -451,9 +398,8 @@ def control_thread_main(config, shared_state, state_lock, stop_event, rospy):
                 pass
 
 
+# ROS 发布线程入口。
 def ros_thread_main(config, shared_state, state_lock, stop_event, rospy):
-    """ROS 发布线程入口。"""
-
     # ROS 相关 import 放在线程函数里，Windows 上导入本文件跑测试时不需要 ROS。
     from std_msgs.msg import Float64MultiArray
 
@@ -474,9 +420,8 @@ def ros_thread_main(config, shared_state, state_lock, stop_event, rospy):
         rate.sleep()
 
 
+# 启动一个后台线程。
 def start_thread(name, target, args):
-    """启动一个后台线程。"""
-
     # daemon=True 表示主程序退出时不会被后台线程卡住。
     # main 里仍然会主动 join 一小段时间，尽量让串口正常关闭。
     thread = threading.Thread(name=name, target=target, args=args)
@@ -485,9 +430,8 @@ def start_thread(name, target, args):
     return thread
 
 
+# 程序入口，负责装配线程和管理生命周期。
 def main():
-    """程序入口。"""
-
     # main 线程只负责装配和生命周期，不写控制算法。
     # 控制算法统一放到 control_thread_main 和各 handle_xxx 函数里。
     import rospy
