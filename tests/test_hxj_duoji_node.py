@@ -1,4 +1,5 @@
 import ast
+import os
 import unittest
 
 import hxj_duoji_node as node
@@ -67,6 +68,64 @@ class HxjDuojiNodeTest(unittest.TestCase):
         node.run_state_machine_once(None, {}, shared_state, lock)
 
         self.assertEqual(shared_state["control_state"], node.STATE_ERROR)
+
+    def test_distribute_end_damping_uses_tangential_joint_lengths(self):
+        arm_params = {
+            "dof": 3,
+            "joints": {
+                "joint1": {"type": "axial", "link": {"length": 0.18}},
+                "joint2": {"type": "tangential", "link": {"length": 0.15}},
+                "joint3": {"type": "tangential", "link": {"length": 0.10}},
+            },
+        }
+
+        result = node.distribute_end_damping(1000.0, arm_params)
+
+        self.assertAlmostEqual(result[1], 714.285714, places=5)
+        self.assertAlmostEqual(result[2], 285.714285, places=5)
+        self.assertNotIn(0, result)
+
+    def test_distribute_end_damping_returns_empty_when_no_tangential_joint(self):
+        arm_params = {
+            "dof": 2,
+            "joints": {
+                "joint1": {"type": "axial", "link": {"length": 0.18}},
+                "joint2": {"type": "axial", "link": {"length": 0.15}},
+            },
+        }
+
+        self.assertEqual(node.distribute_end_damping(1000.0, arm_params), {})
+
+    def test_handle_plan_stores_damping_targets_in_shared_state(self):
+        lock = node.threading.Lock()
+        shared_state = node.create_shared_state([0, 1, 2], 3)
+        config = {
+            "end_damping": 1000.0,
+            "arm_params": {
+                "dof": 3,
+                "joints": {
+                    "joint1": {"type": "axial", "link": {"length": 0.18}},
+                    "joint2": {"type": "tangential", "link": {"length": 0.15}},
+                    "joint3": {"type": "tangential", "link": {"length": 0.10}},
+                },
+            },
+        }
+
+        node.handle_plan(None, config, shared_state, lock)
+
+        self.assertAlmostEqual(shared_state["damping_targets"][1], 714.285714, places=5)
+        self.assertAlmostEqual(shared_state["damping_targets"][2], 285.714285, places=5)
+
+    def test_load_example_json_and_distribute_damping(self):
+        json_path = "E:\\AaA\\Ask\\example.json"
+        if not os.path.exists(json_path):
+            self.skipTest("example.json 不在当前机器上")
+
+        arm_params = node.load_arm_params(json_path)
+        result = node.distribute_end_damping(1000.0, arm_params)
+
+        self.assertAlmostEqual(result[1], 714.285714, places=5)
+        self.assertAlmostEqual(result[2], 285.714285, places=5)
 
     def test_function_summaries_are_above_def_lines(self):
         source_path = "hxj_duoji_node.py"

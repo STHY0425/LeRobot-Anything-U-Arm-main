@@ -15,7 +15,7 @@ hxj_duoji_node.py
 - 舵机 SDK 只在控制线程中访问，避免多个线程同时操作串口。
 - 使用官方同步读取 API `send_sync_servo_monitor(servo_ids)` 读取舵机状态。
 - 暂时不做零点标定。
-- 暂时不做运动解算。
+- 已加入末端合阻尼到切向舵机的分配计算。
 - 暂时不做重力补偿。
 - 在控制线程中保留状态机框架，方便后续补不同运动状态下的控制方案。
 
@@ -56,12 +56,12 @@ ROS 线程
 
 ## 控制状态机
 
-当前状态机只搭框架，核心算法留空：
+当前状态机已在 `PLAN` 状态加入末端合阻尼分配：
 
 ```text
 IDLE    空闲
 MANUAL  手动调试
-PLAN    规划/逆解预留
+PLAN    计算末端合阻尼到切向舵机的分配
 MOVE    运动执行预留
 HOLD    保持预留
 ERROR   错误保护
@@ -76,6 +76,38 @@ handle_plan()
 handle_move()
 handle_hold()
 handle_error()
+```
+
+## 末端合阻尼分配
+
+机械臂参数从 JSON 读取，格式沿用示例：
+
+```json
+{
+  "dof": 3,
+  "joints": {
+    "joint1": { "type": "axial", "link": { "length": 0.18 } },
+    "joint2": { "type": "tangential", "link": { "length": 0.15 } },
+    "joint3": { "type": "tangential", "link": { "length": 0.10 } }
+  }
+}
+```
+
+舵机 ID 按 joint 自然顺序安排：
+
+```text
+joint1 -> servo_id 0
+joint2 -> servo_id 1
+joint3 -> servo_id 2
+```
+
+`axial` 关节不参与阻尼分配。`tangential` 关节按从当前关节到末端的剩余连杆长度和分配。
+
+例如末端合阻尼为 `1000` 时：
+
+```text
+joint2 weight = 0.15 + 0.10 = 0.25 -> servo 1 = 714.2857
+joint3 weight = 0.10              -> servo 2 = 285.7143
 ```
 
 ## ROS 参数
@@ -93,6 +125,8 @@ handle_error()
 ~current_topic        默认 /servo_currents
 ~read_current         默认 false
 ~release_on_shutdown  默认 false
+~arm_config           默认空，机械臂 JSON 文件路径
+~end_damping          默认 0.0，末端合阻尼
 ```
 
 ## Linux / ROS 运行示例
@@ -107,7 +141,9 @@ rosrun uarm hxj_duoji_node.py \
   _baudrate:=115200 \
   _servo_ids:="[0,1,2,3,4,5,6]" \
   _num_servos:=7 \
-  _rate:=50
+  _rate:=50 \
+  _arm_config:=/absolute/path/to/example.json \
+  _end_damping:=1000
 ```
 
 查看角度：

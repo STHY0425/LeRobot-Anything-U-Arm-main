@@ -26,6 +26,83 @@ STATE_HOLD = "HOLD"        # 保持：预留给位置保持或锁定
 STATE_ERROR = "ERROR"      # 错误：预留给停机、释放、等待人工处理
 
 
+# 读取机械臂 JSON 参数文件。
+def load_arm_params(path):
+    import json
+
+    with open(path, "r", encoding="utf-8") as file_obj:
+        return json.load(file_obj)
+
+
+# 从 joint 名称里取数字序号，例如 joint3 -> 3。
+def joint_number(joint_name):
+    text = str(joint_name)
+    digits = ""
+    for char in text:
+        if char >= "0" and char <= "9":
+            digits += char
+    if digits == "":
+        return 0
+    return int(digits)
+
+
+# 按 joint 后面的数字顺序返回关节条目。
+def ordered_joint_items(arm_params):
+    joints = arm_params.get("joints", {})
+    items = []
+    for joint_name, joint_data in joints.items():
+        items.append((joint_name, joint_data))
+    items.sort(key=lambda item: joint_number(item[0]))
+    return items
+
+
+# 读取单个关节的连杆长度。
+def joint_link_length(joint_data):
+    link = joint_data.get("link", {})
+    return float(link.get("length", 0.0))
+
+
+# 计算每个切向舵机的阻尼分配权重。
+def calculate_tangential_weights(arm_params):
+    joint_items = ordered_joint_items(arm_params)
+    weights = {}
+
+    for index in range(len(joint_items)):
+        joint_name, joint_data = joint_items[index]
+        joint_type = str(joint_data.get("type", "")).lower()
+        if joint_type != "tangential":
+            continue
+
+        # servo_id 按 joint 自然顺序安排：joint1 -> 0，joint2 -> 1。
+        servo_id = index
+
+        # 当前切向关节对末端的影响，用从本关节到末端的剩余连杆长度和表示。
+        weight = 0.0
+        for follow_index in range(index, len(joint_items)):
+            weight += joint_link_length(joint_items[follow_index][1])
+
+        if weight > 0.0:
+            weights[servo_id] = weight
+
+    return weights
+
+
+# 把末端合阻尼分配到每个切向舵机。
+def distribute_end_damping(total_damping, arm_params):
+    weights = calculate_tangential_weights(arm_params)
+    sum_weight = 0.0
+    for weight in weights.values():
+        sum_weight += weight
+
+    if sum_weight <= 0.0:
+        return {}
+
+    result = {}
+    for servo_id, weight in weights.items():
+        result[servo_id] = float(total_damping) * weight / sum_weight
+    return result
+
+
 # 解析 ROS 参数里的整数列表，支持数字、列表和 "[0,1,2]" 字符串。
 def parse_int_list(raw_value):
     # ROS 参数有时会从 launch 文件里以字符串形式传进来，比如 "[0,1,2]"。
@@ -122,6 +199,7 @@ def create_shared_state(servo_ids, num_servos):
         "servo_ids": list(servo_ids),
         "num_servos": int(num_servos),
         "servos": servos,
+        "damping_targets": {},
         "control_state": STATE_IDLE,
         "last_error": "",
         "last_update": 0.0,
@@ -177,6 +255,9 @@ def read_ros_config(rospy):
         "current_topic": rospy.get_param("~current_topic", "/servo_currents"),
         "read_current": bool(rospy.get_param("~read_current", False)),
         "release_on_shutdown": bool(rospy.get_param("~release_on_shutdown", False)),
+        "arm_config": rospy.get_param("~arm_config", ""),
+        "arm_params": None,
+        "end_damping": float(rospy.get_param("~end_damping", 0.0)),
     }
 
 
@@ -274,6 +355,7 @@ def copy_shared_state(shared_state, state_lock):
             "servo_ids": list(shared_state["servo_ids"]),
             "num_servos": shared_state["num_servos"],
             "servos": {},
+            "damping_targets": dict(shared_state["damping_targets"]),
             "control_state": shared_state["control_state"],
             "last_error": shared_state["last_error"],
             "last_update": shared_state["last_update"],
@@ -299,8 +381,18 @@ def handle_manual(manager, config, shared_state, state_lock):
 
 # 规划状态处理：预留给机械臂逆解或轨迹准备。
 def handle_plan(manager, config, shared_state, state_lock):
-    # 这里保留机械臂逆解或轨迹准备入口，当前不做具体计算。
-    return
+    # 当前的“逆解”只做末端合阻尼到切向舵机的分配。
+    arm_params = config.get("arm_params")
+    if arm_params is None:
+        return
+
+    damping_targets = distribute_end_damping(config.get("end_damping", 0.0), arm_params)
+
+    state_lock.acquire()
+    try:
+        shared_state["damping_targets"] = damping_targets
+    finally:
+        state_lock.release()
 
 
 # 运动执行状态处理：预留给正式运动控制。
@@ -438,6 +530,8 @@ def main():
 
     rospy.init_node("hxj_duoji_node")
     config = read_ros_config(rospy)
+    if config["arm_config"] != "":
+        config["arm_params"] = load_arm_params(config["arm_config"])
     shared_state = create_shared_state(config["servo_ids"], config["num_servos"])
     state_lock = threading.Lock()
     stop_event = threading.Event()
