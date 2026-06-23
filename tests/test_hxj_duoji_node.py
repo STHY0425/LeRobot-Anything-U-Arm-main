@@ -58,6 +58,15 @@ class HxjDuojiNodeTest(unittest.TestCase):
         self.assertEqual(states[1]["current"], 0.5)
         self.assertTrue(states[1]["online"])
 
+    def test_unknown_control_state_switches_to_error(self):
+        lock = node.threading.Lock()
+        shared_state = node.create_shared_state([0], 1)
+        shared_state["control_state"] = "BAD_STATE"
+
+        node.run_state_machine_once(None, {}, shared_state, lock)
+
+        self.assertEqual(shared_state["control_state"], node.STATE_ERROR)
+
 
 if __name__ == "__main__":
     unittest.main()

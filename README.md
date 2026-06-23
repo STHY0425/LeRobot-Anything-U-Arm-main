@@ -1,68 +1,108 @@
-# 华馨京舵机版 FeelForce
+# 华馨京舵机单文件节点
 
-这是面向华馨京 / FashionStar 舵机的轻量版 FeelForce 工程。它保留原 FeelForce 的模块化思想，但不会照搬 CAN 电机工程里的通信层和协议层。
+这是一个从 STM32/C++ 思路迁移到 Python/ROS 的华馨京舵机控制框架。
 
-## 核心结构
-
-原 FeelForce 面向 CAN + MIT 电机协议，结构是：
+当前版本已经放弃旧的多文件模块结构，核心代码集中在：
 
 ```text
-Communication -> ProtocolDecoder -> Motor -> Arm -> Control / Publisher -> Node
+hxj_duoji_node.py
 ```
 
-华馨京舵机官方 SDK 已经封装串口通信和协议帧，因此本工程把通信和协议融合为一个舵机总线：
+## 当前目标
 
-```text
-FashionStarServoBus -> HuaXinjingArm -> GravityCompensator / Publisher -> Node
-```
+- 使用一个 Python 文件完成节点主体。
+- 只保留三个线程角色：`main` 主线程、ROS 发布线程、控制线程。
+- 舵机 SDK 只在控制线程中访问，避免多个线程同时操作串口。
+- 使用官方同步读取 API `send_sync_servo_monitor(servo_ids)` 读取舵机状态。
+- 暂时不做零点标定。
+- 暂时不做运动解算。
+- 暂时不做重力补偿。
+- 在控制线程中保留状态机框架，方便后续补不同运动状态下的控制方案。
 
-保留的核心思维是：
-
-- `node.py` 是唯一装配点，负责创建对象、注入依赖和管理生命周期。
-- `HuaXinjingArm` 是唯一机械臂语义入口，负责读舵机状态、保存最新快照、生成 ROS 数组。
-- `GravityCompensator` 只负责控制策略：读取同一帧状态、计算补偿、下发阻尼。
-- `publisher.py` 只消费 `Arm` 的状态快照，不直接访问硬件。
-- `FashionStarServoBus` 直接调用官方 API，不再维护独立 `comm` / `protocol` 层。
-
-## 目录结构
+## 文件说明
 
 ```text
 feel_force_duoji/
-  hxj_servo_reader.py              # 只读角度/电流的 ROS 薄入口
-  hxj_gravity_compensation.py      # 重力补偿 ROS 薄入口
-  architecture.md                  # 原 FeelForce 架构说明
-  ARCHITECTURE_HXJ.md              # 华馨京舵机版架构说明
-  EXECUTION_LOGIC.md               # 工程执行逻辑详细说明
-  hxj_modular/
-    servo_bus.py                   # 通信 + 协议融合后的舵机总线
-    config.py                      # 运行配置
-    state_types.py                 # ServoState / ArmState
-    arm.py                         # 机械臂聚合层和状态快照
-    dynamics.py                    # FeelForce 重力力矩计算与阻尼映射
-    gravity_compensation.py        # 重力补偿控制器
-    publisher.py                   # ROS 发布层
-    ros_params.py                  # ROS 参数读取
-    node.py                        # 装配层
+  hxj_duoji_node.py              # 单文件 ROS 节点和控制状态机框架
+  tests/test_hxj_duoji_node.py   # 不依赖 ROS/硬件的本地测试
 ```
 
-## 角度读取节点
+旧的 `hxj_modular/`、`hxj_servo_reader.py`、`hxj_gravity_compensation.py`
+已经移除。如需查看旧实现，可以通过 git 历史回退或查看 baseline commit。
 
-运行：
+## 线程结构
 
-```bash
-rosrun uarm hxj_servo_reader.py
+```text
+main 主线程
+  -> 初始化 ROS
+  -> 读取参数
+  -> 创建共享状态和线程锁
+  -> 启动 ROS 线程
+  -> 启动控制线程
+  -> 等待退出并关闭线程
+
+ROS 线程
+  -> 读取共享状态快照
+  -> 发布 /servo_angles
+  -> 可选发布 /servo_currents
+
+控制线程
+  -> 打开 serial.Serial
+  -> 创建 UartServoManager
+  -> 调用 send_sync_servo_monitor(servo_ids)
+  -> 更新共享状态
+  -> 执行控制状态机
 ```
 
-默认发布：
+## 控制状态机
 
-- `/servo_angles`：`std_msgs/Float64MultiArray`
-- 数组索引对应舵机 ID
-- 默认值为启动零点后的角度偏移，单位 degree
+当前状态机只搭框架，核心算法留空：
+
+```text
+IDLE    空闲
+MANUAL  手动调试
+PLAN    规划/逆解预留
+MOVE    运动执行预留
+HOLD    保持预留
+ERROR   错误保护
+```
+
+后续主要补这些函数：
+
+```python
+handle_idle()
+handle_manual()
+handle_plan()
+handle_move()
+handle_hold()
+handle_error()
+```
+
+## ROS 参数
 
 常用参数：
 
+```text
+~port                 默认 /dev/ttyUSB0
+~baudrate             默认 115200
+~timeout              默认 0.0
+~servo_ids            默认 [0,1,2,3,4,5,6]
+~num_servos           默认 7
+~rate                 默认 50.0
+~angle_topic          默认 /servo_angles
+~current_topic        默认 /servo_currents
+~read_current         默认 false
+~release_on_shutdown  默认 false
+```
+
+## Linux / ROS 运行示例
+
+Windows 当前只能做语法和纯 Python 测试，不能验证 ROS 与舵机硬件。
+
+在 Ubuntu + ROS 环境中运行：
+
 ```bash
-rosrun uarm hxj_servo_reader.py \
+rosrun uarm hxj_duoji_node.py \
   _port:=/dev/ttyUSB0 \
   _baudrate:=115200 \
   _servo_ids:="[0,1,2,3,4,5,6]" \
@@ -70,91 +110,25 @@ rosrun uarm hxj_servo_reader.py \
   _rate:=50
 ```
 
-可选电流发布：
+查看角度：
 
 ```bash
-rosrun uarm hxj_servo_reader.py _read_current:=true _current_topic:=/servo_currents
+rostopic echo /servo_angles
 ```
 
-## 重力补偿节点
-
-运行：
+如需发布电流：
 
 ```bash
-rosrun uarm hxj_gravity_compensation.py
+rosrun uarm hxj_duoji_node.py _read_current:=true
 ```
 
-执行流程：
+## 本地验证
 
-```text
-读取一帧舵机状态
-  -> 舵机角度映射为动力学关节角 q(rad)
-  -> 计算 tau_g(q)
-  -> 取反得到补偿力矩
-  -> 映射为阻尼功率
-  -> set_damping()
-```
-
-发布：
-
-- `/servo_angles`：当前角度偏移
-- `/servo_damping_powers`：每个舵机当前阻尼功率，单位 mW
-- `/gravity_torques`：动力学模式下的补偿力矩，单位 Nm
-
-## 重力补偿模式
-
-- `auto`：默认。能加载 URDF + Pinocchio 时使用动力学重力补偿，否则退化为角度变化自适应阻尼。
-- `dynamics`：强制使用动力学重力补偿。
-- `adaptive`：强制使用角度变化自适应阻尼。
-
-动力学模式：
+Windows 上可以运行：
 
 ```bash
-rosrun uarm hxj_gravity_compensation.py \
-  _mode:=dynamics \
-  _urdf_path:=/absolute/path/to/arm7dof.urdf \
-  _joint_servo_ids:="[0,1,2,3,4,5,6]" \
-  _joint_signs:="[1,1,1,1,1,1,1]" \
-  _joint_offsets_deg:="[0,0,0,0,0,0,0]" \
-  _compensation_gain:=0.8 \
-  _torque_gain:=100.0 \
-  _base_power:=100 \
-  _max_power:=3000
+python -m unittest tests.test_hxj_duoji_node
+python -m py_compile hxj_duoji_node.py tests/test_hxj_duoji_node.py
 ```
 
-自适应阻尼模式：
-
-```bash
-rosrun uarm hxj_gravity_compensation.py \
-  _mode:=adaptive \
-  _base_power:=600 \
-  _angle_gain:=20 \
-  _max_power:=3000 \
-  _release_delta:=-2.0
-```
-
-## 关节映射参数
-
-动力学模型里的关节顺序和舵机 ID 不一定一致，因此提供三个参数对齐：
-
-- `~joint_servo_ids`：参与动力学重力补偿的舵机 ID 顺序，默认等于 `~servo_ids`。
-- `~joint_signs`：每个关节的方向系数，常用 `1` 或 `-1`。
-- `~joint_offsets_deg`：每个关节进入 URDF 模型前额外叠加的角度偏置，单位 degree。
-
-如果 URDF 只有部分主动关节，可以只配置对应舵机：
-
-```bash
-rosrun uarm hxj_gravity_compensation.py \
-  _mode:=dynamics \
-  _urdf_path:=/absolute/path/to/arm3dof.urdf \
-  _joint_servo_ids:="[1,2,3]" \
-  _joint_signs:="[1,-1,1]"
-```
-
-## 重要说明
-
-- 华馨京舵机没有直接力矩控制接口，FeelForce 的力矩输出会被近似映射为阻尼功率。
-- `set_damping()` 不是闭环力矩控制，第一次上硬件请使用较小的 `base_power` 和 `torque_gain`。
-- `auto` 模式在 URDF 或 Pinocchio 不可用时，会自动使用角度变化自适应阻尼。
-- 动力学模式效果依赖 URDF、舵机 ID 顺序、关节方向、机械零点、质量和质心参数是否正确。
-- 节点每个循环只读取一次硬件状态；发布器使用同一帧快照，避免控制和发布重复读舵机。
+这些验证只覆盖不依赖 ROS 和舵机硬件的部分。
