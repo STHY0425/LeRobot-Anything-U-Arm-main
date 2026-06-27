@@ -1,0 +1,38 @@
+{
+    "arm_name": "example",
+    "gravity": [0.0, 0.0, -9.80665],
+    "units": {
+        "length": "m",
+        "mass": "kg"
+    },
+    "dof": 3,
+    "joints": {
+        "joint1": {
+            "type": "axial",
+            "link": {
+                "length": 0.18,
+                "mass": 0.16,
+                "center_of_mass": [0.09, 0.0, 0.0]
+            },
+            "actuator_mass": 0.055
+        },
+        "joint2": {
+            "type": "tangential",
+            "link": {
+                "length": 0.15,
+                "mass": 0.12,
+                "center_of_mass": [0.075, 0.0, 0.0]
+            },
+            "actuator_mass": 0.045
+        },
+        "joint3": {
+            "type": "tangential",
+            "link": {
+                "length": 0.10,
+                "mass": 0.08,
+                "center_of_mass": [0.05, 0.0, 0.0]
+            },
+            "actuator_mass": 0.035
+        }
+    }
+}

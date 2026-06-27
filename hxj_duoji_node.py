@@ -2,311 +2,240 @@
 # -*- coding: utf-8 -*-
 """华馨京舵机单文件 ROS 节点框架。
 
-本文件故意把结构写得直接一些，方便后续继续补状态机和控制算法。
-当前只保留三个线程角色：
+本文件仍然只保留一个 py 文件，但内部按职责分成三个类：
 
-1. main 主线程：创建资源、启动线程、负责退出。
-2. ROS 线程：发布 ROS 话题，不直接访问舵机 SDK。
-3. 控制线程：访问舵机 SDK，同步读取状态，运行控制状态机。
+1. DuojiConfig：整理手动配置和读取 config/example.json。
+2. RosPublisher：ROS 发布线程，只读共享状态，不访问舵机 SDK。
+3. Controller：控制线程，唯一访问串口和 UartServoManager。
 """
 
+import json
+import os
 import threading
 import time
+
+import rospy
+import serial
+from std_msgs.msg import Float64MultiArray
+import fashionstar_uart_sdk as uservo
 
 
 # 控制状态机的状态名。
 #
-# 这里先用字符串常量，不用 enum，是为了保持代码直接、好改、好打印。
-# 后续你在控制线程里补具体策略时，可以只围绕这些状态写 if/elif。
+# 状态机可以理解成：程序每一轮先看自己现在是什么状态，
+# 然后进入对应的 handle_xxx() 方法执行一小段逻辑。
 STATE_IDLE = "IDLE"        # 空闲：不主动下发运动命令
 STATE_MANUAL = "MANUAL"    # 手动：预留给手动调试或单关节控制
-STATE_PLAN = "PLAN"        # 规划：预留给逆解、轨迹准备
+STATE_PLAN = "PLAN"        # 规划：预留给逆解、DH 表和控制算法
 STATE_MOVE = "MOVE"        # 运动：预留给正式运动控制
 STATE_HOLD = "HOLD"        # 保持：预留给位置保持或锁定
 STATE_ERROR = "ERROR"      # 错误：预留给停机、释放、等待人工处理
 
 
-# 读取机械臂 JSON 参数文件。
-def load_arm_params(path):
-    import json
+# 机械臂整体参数。
+class Arm:
+    # 初始化机械臂参数。
+    def __init__(self, arm_name="", dof=0, joints_length=None,joints_mass=None,actuator_mass=None):
+        self.arm_name = arm_name
+        self.dof = int(dof)
+        if joints_length is None:
+            joints_length = []
+        self.joints_length = joints_length
+        if joints_mass is None:
+            joints_mass = []
+        self.joints_mass = joints_mass
+        if actuator_mass is None:
+            actuator_mass = []
+        self.actuator_mass = actuator_mass
 
-    with open(path, "r", encoding="utf-8") as file_obj:
-        return json.load(file_obj)
+class DuojiConfig:
+    # 初始化配置读取类。
+    def __init__(
+        self,
+        port="/dev/ttyUSB0",
+        baudrate=115200,
+        timeout=0.0,
+        servo_ids=None,
+        num_servos=7,
+        rate=50.0,
+        angle_topic="/servo_angles",
+        current_topic="/servo_currents",
+        release_on_shutdown=False,
+        arm_config=None,
+        end_damping=0.0,
+    ):
+        if servo_ids is None:
+            servo_ids = [0, 1, 2, 3, 4, 5, 6]
 
+        self.port = port
+        self.baudrate = int(baudrate)
+        self.timeout = float(timeout)
+        self.servo_ids = self.parse_int_list(servo_ids)
+        self.num_servos = int(num_servos)
+        self.rate = float(rate)
+        if self.rate <= 0.0:
+            raise ValueError("rate 必须大于 0")
+        self.angle_topic = angle_topic
+        self.current_topic = current_topic
+        self.release_on_shutdown = self.parse_bool(release_on_shutdown)
+        self.arm_config = self.default_arm_config() if arm_config is None else arm_config
+        self.arm_params = None
+        self.end_damping = float(end_damping)
 
-# 从 joint 名称里取数字序号，例如 joint3 -> 3。
-def joint_number(joint_name):
-    text = str(joint_name)
-    digits = ""
-    for char in text:
-        if char >= "0" and char <= "9":
-            digits += char
-    if digits == "":
-        return 0
-    return int(digits)
+        self.load_arm_params()
+        self.values = self.to_dict()
 
+    # 返回默认机械臂 JSON 配置路径。
+    @staticmethod
+    def default_arm_config():
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "example.json")
 
-# 按 joint 后面的数字顺序返回关节条目。
-def ordered_joint_items(arm_params):
-    joints = arm_params.get("joints", {})
-    items = []
-    for joint_name, joint_data in joints.items():
-        items.append((joint_name, joint_data))
-    items.sort(key=lambda item: joint_number(item[0]))
-    return items
+    # 读取机械臂 JSON 参数文件。
+    @staticmethod
+    def load_arm_params_file(path):
+        # staticmethod 表示这个方法不需要使用 self。
+        # 这样既能放在类里面，又能写成 DuojiConfig.load_arm_params_file(path)。
+        # 这里使用 staticmethod，是因为“读取某个路径的 JSON”不依赖某一个对象内部状态。
 
+        # with open(...) as file_obj 会在读取结束后自动关闭文件。
+        # encoding="utf-8" 用来避免 Windows 上读取中文注释或中文字段时乱码。
+        with open(path, "r", encoding="utf-8") as file_obj:
+            return DuojiConfig.build_arm_from_dict(json.load(file_obj))
 
-# 读取单个关节的连杆长度。
-def joint_link_length(joint_data):
-    link = joint_data.get("link", {})
-    return float(link.get("length", 0.0))
+    @staticmethod
+    def build_arm_from_dict(raw_params):
+        arm_name = str(DuojiConfig.require_key(raw_params, "arm_name", "arm"))
+        dof = int(DuojiConfig.require_key(raw_params, "dof", "arm"))
+        joints_data = DuojiConfig.require_key(raw_params, "joints", "arm")
 
+        joints_length = []
+        joints_mass = []
+        actuator_mass = []
+        for joint_index in range(dof):
+            joint_name = "joint%d" % (joint_index + 1)
+            joint_data = DuojiConfig.require_key(joints_data, joint_name, "joints")
+            link_data = DuojiConfig.require_key(joint_data, "link", joint_name)
 
-# 计算每个切向舵机的阻尼分配权重。
-def calculate_tangential_weights(arm_params):
-    joint_items = ordered_joint_items(arm_params)
-    weights = {}
+            joints_length.append(float(DuojiConfig.require_key(link_data, "length", joint_name + ".link")))
+            joints_mass.append(float(DuojiConfig.require_key(link_data, "mass", joint_name + ".link")))
+            actuator_mass.append(float(DuojiConfig.require_key(joint_data, "actuator_mass", joint_name)))
 
-    for index in range(len(joint_items)):
-        joint_name, joint_data = joint_items[index]
-        joint_type = str(joint_data.get("type", "")).lower()
-        if joint_type != "tangential":
-            continue
+        return Arm(
+            arm_name=arm_name,
+            dof=dof,
+            joints_length=joints_length,
+            joints_mass=joints_mass,
+            actuator_mass=actuator_mass,
+        )
 
-        # servo_id 按 joint 自然顺序安排：joint1 -> 0，joint2 -> 1。
-        servo_id = index
+    # 读取 JSON 必填字段，缺字段时直接报错中断。
+    @staticmethod
+    def require_key(data, key, owner):
+        if not isinstance(data, dict):
+            raise ValueError("%s 必须是 JSON 对象" % owner)
+        if key not in data:
+            raise ValueError("%s 缺少必填字段: %s" % (owner, key))
+        return data[key]
 
-        # 当前切向关节对末端的影响，用从本关节到末端的剩余连杆长度和表示。
-        weight = 0.0
-        for follow_index in range(index, len(joint_items)):
-            weight += joint_link_length(joint_items[follow_index][1])
-
-        if weight > 0.0:
-            weights[servo_id] = weight
-
-    return weights
-
-
-# 把末端合阻尼分配到每个切向舵机。
-def distribute_end_damping(total_damping, arm_params):
-    weights = calculate_tangential_weights(arm_params)
-    sum_weight = 0.0
-    for weight in weights.values():
-        sum_weight += weight
-
-    if sum_weight <= 0.0:
-        return {}
-
-    result = {}
-    for servo_id, weight in weights.items():
-        result[servo_id] = float(total_damping) * weight / sum_weight
-    return result
-
-
-# 解析 ROS 参数里的整数列表，支持数字、列表和 "[0,1,2]" 字符串。
-def parse_int_list(raw_value):
-    # ROS 参数有时会从 launch 文件里以字符串形式传进来，比如 "[0,1,2]"。
-    # 这里集中解析，后面的代码只处理真正的 int 列表。
-    if raw_value is None:
-        return []
-    if isinstance(raw_value, int):
-        return [raw_value]
-    if isinstance(raw_value, str):
-        text = raw_value.strip()
-        text = text.strip("[")
-        text = text.strip("]")
-        if text == "":
+    # 解析手动配置里的整数列表，支持数字、列表和 "[0,1,2]" 字符串。
+    @staticmethod
+    def parse_int_list(raw_value):
+        if raw_value is None:
             return []
+        if isinstance(raw_value, int):
+            return [raw_value]
+        if isinstance(raw_value, str):
+            text = raw_value.strip()
+            text = text.strip("[")
+            text = text.strip("]")
+            if text == "":
+                return []
+            result = []
+            for item in text.split(","):
+                item = item.strip()
+                if item != "":
+                    result.append(int(item))
+            return result
+
         result = []
-        for item in text.split(","):
-            item = item.strip()
-            if item != "":
-                result.append(int(item))
+        for item in raw_value:
+            result.append(int(item))
         return result
-    result = []
-    for item in raw_value:
-        result.append(int(item))
-    return result
 
+    # 解析手动配置里的布尔值，支持 bool、数字和常见字符串。
+    @staticmethod
+    def parse_bool(raw_value):
+        if isinstance(raw_value, bool):
+            return raw_value
+        if isinstance(raw_value, int) or isinstance(raw_value, float):
+            return raw_value != 0
+        if isinstance(raw_value, str):
+            text = raw_value.strip().lower()
+            if text in ("true", "1", "yes", "y", "on"):
+                return True
+            if text in ("false", "0", "no", "n", "off", ""):
+                return False
+            raise ValueError("无法解析布尔参数: %s" % raw_value)
+        return bool(raw_value)
 
-# 安全读取对象属性，同时兼容对象和字典。
-def get_attr(obj, name, default_value):
-    # 官方 SDK 的同步监控数据可能是对象，也可能随版本变化成字典。
-    # 这里做一个很薄的兼容层，避免状态机代码关心这些细节。
-    if isinstance(obj, dict):
-        return obj.get(name, default_value)
-    return getattr(obj, name, default_value)
+    # 按手动设置整理成普通配置字典。
+    @staticmethod
+    def read_config(
+        port="/dev/ttyUSB0",
+        baudrate=115200,
+        timeout=0.0,
+        servo_ids=None,
+        num_servos=7,
+        rate=50.0,
+        angle_topic="/servo_angles",
+        current_topic="/servo_currents",
+        release_on_shutdown=False,
+        arm_config=None,
+        end_damping=0.0,
+    ):
+        config_reader = DuojiConfig(
+            port=port,
+            baudrate=baudrate,
+            timeout=timeout,
+            servo_ids=servo_ids,
+            num_servos=num_servos,
+            rate=rate,
+            angle_topic=angle_topic,
+            current_topic=current_topic,
+            release_on_shutdown=release_on_shutdown,
+            arm_config=arm_config,
+            end_damping=end_damping,
+        )
+        return config_reader.to_dict()
 
+    # 按 arm_config 路径读取机械臂 JSON 参数。
+    def load_arm_params(self):
+        if self.arm_config != "":
+            self.arm_params = self.load_arm_params_file(self.arm_config)
 
-# 把官方同步监控数据转换成普通字典，供共享状态和状态机使用。
-def build_servo_state(servo_id, monitor_data):
-    # 字段保持简单，后续控制状态机直接读这些 key。
-    # 官方同步监控示例里角度字段是 angle_monitor。
-    # 这里额外兼容 angle，是为了不同 SDK 版本字段名变化时更容易跑起来。
-    angle = get_attr(monitor_data, "angle_monitor", None)
-    if angle is None:
-        angle = get_attr(monitor_data, "angle", None)
-
-    return {
-        "id": int(servo_id),
-        "angle": None if angle is None else float(angle),
-        "current": float(get_attr(monitor_data, "current", 0.0)),
-        "voltage": float(get_attr(monitor_data, "voltage", 0.0)),
-        "power": float(get_attr(monitor_data, "power", 0.0)),
-        "temp": float(get_attr(monitor_data, "temp", 0.0)),
-        "status": int(get_attr(monitor_data, "status", 0)),
-        "online": angle is not None,
-        "stamp": time.time(),
-    }
-
-
-# 从官方 SDK 管理器缓存里取单个舵机对象。
-def get_servo_from_manager(manager, servo_id):
-    if not hasattr(manager, "servos"):
-        return None
-
-    # 本地示例里使用 manager.servos[id] 读取；
-    # 有些 SDK/封装可能让 servos 表现得像 dict，所以同时兼容 .get()。
-    servos = manager.servos
-    if hasattr(servos, "get"):
-        return servos.get(servo_id)
-
-    try:
-        return servos[servo_id]
-    except Exception:
-        return None
-
-
-# 创建线程之间共享的状态字典。
-def create_shared_state(servo_ids, num_servos):
-    # shared_state 是 ROS 线程和控制线程之间唯一共享的数据。
-    # 访问它时必须配合 state_lock，避免一个线程读到另一个线程写到一半的数据。
-    servos = {}
-    for servo_id in servo_ids:
-        servos[int(servo_id)] = {
-            "id": int(servo_id),
-            "angle": None,
-            "current": 0.0,
-            "voltage": 0.0,
-            "power": 0.0,
-            "temp": 0.0,
-            "status": 0,
-            "online": False,
-            "stamp": 0.0,
+    # 导出普通字典，兼容 RosPublisher 和 Controller。
+    def to_dict(self):
+        return {
+            "port": self.port,
+            "baudrate": self.baudrate,
+            "timeout": self.timeout,
+            "servo_ids": list(self.servo_ids),
+            "num_servos": self.num_servos,
+            "rate": self.rate,
+            "angle_topic": self.angle_topic,
+            "current_topic": self.current_topic,
+            "release_on_shutdown": self.release_on_shutdown,
+            "arm_config": self.arm_config,
+            "arm_params": self.arm_params,
+            "end_damping": self.end_damping,
         }
 
-    return {
-        "servo_ids": list(servo_ids),
-        "num_servos": int(num_servos),
-        "servos": servos,
-        "damping_targets": {},
-        "control_state": STATE_IDLE,
-        "last_error": "",
-        "last_update": 0.0,
-    }
-
-
-# 生成 /servo_angles 话题需要的数组。
-def make_angle_array(shared_state):
-    # 数组下标仍然对应舵机 ID。没有数据的位置填 0。
-    # 当前版本不做零点标定，直接发布同步读取到的角度。
-    # ROS 的 Float64MultiArray 是数组，不是 dict。
-    # 为了和原工程保持一致，数组下标仍然直接使用舵机 ID。
-    data = []
-    for _ in range(shared_state["num_servos"]):
-        data.append(0.0)
-
-    for servo_id, servo_state in shared_state["servos"].items():
-        if servo_id >= 0 and servo_id < len(data):
-            angle = servo_state.get("angle")
-            if angle is not None:
-                data[servo_id] = float(angle)
-    return data
-
-
-# 生成 /servo_currents 话题需要的数组。
-def make_current_array(shared_state):
-    data = []
-    for _ in range(shared_state["num_servos"]):
-        data.append(0.0)
-
-    for servo_id, servo_state in shared_state["servos"].items():
-        if servo_id >= 0 and servo_id < len(data):
-            data[servo_id] = float(servo_state.get("current", 0.0))
-    return data
-
-
-# 读取 ROS 参数并整理成普通字典。
-def read_ros_config(rospy):
-    # 这里返回普通字典，不额外拆类，后续想改参数名也比较直观。
-    # 这里只读取当前框架真正需要的参数。
-    # 旧工程里的 URDF、重力补偿、关节方向等参数已经故意移除。
-    servo_ids = parse_int_list(rospy.get_param("~servo_ids", [0, 1, 2, 3, 4, 5, 6]))
-    num_servos = int(rospy.get_param("~num_servos", 7))
-
-    return {
-        "port": rospy.get_param("~port", "/dev/ttyUSB0"),
-        "baudrate": int(rospy.get_param("~baudrate", 115200)),
-        "timeout": float(rospy.get_param("~timeout", 0.0)),
-        "servo_ids": servo_ids,
-        "num_servos": num_servos,
-        "rate": float(rospy.get_param("~rate", 50.0)),
-        "angle_topic": rospy.get_param("~angle_topic", "/servo_angles"),
-        "current_topic": rospy.get_param("~current_topic", "/servo_currents"),
-        "read_current": bool(rospy.get_param("~read_current", False)),
-        "release_on_shutdown": bool(rospy.get_param("~release_on_shutdown", False)),
-        "arm_config": rospy.get_param("~arm_config", ""),
-        "arm_params": None,
-        "end_damping": float(rospy.get_param("~end_damping", 0.0)),
-    }
-
-
-# 打开串口并创建官方 SDK 管理器。
-def open_servo_manager(config):
-    # 串口和 SDK 延迟导入，方便 Windows 上做纯 Python 测试。
-    # 真正运行 ROS 节点时，控制线程会调用这里。
-    import serial
-    import fashionstar_uart_sdk as uservo
-
-    uart = serial.Serial(
-        port=config["port"],
-        baudrate=config["baudrate"],
-        parity=serial.PARITY_NONE,
-        stopbits=1,
-        bytesize=8,
-        timeout=config["timeout"],
-    )
-    manager = uservo.UartServoManager(uart)
-    return uart, manager
-
-
-# 使用官方同步读取 API 读取一组舵机状态。
-def read_sync_monitor(manager, servo_ids):
-    # 官方示例调用后从 manager.servos[id] 取数据。官方文档也描述该 API 会返回
-    # 同步监控数据，所以这里同时兼容返回值和 manager.servos 两种形式。
-    # 这是本工程读取舵机状态的主路径：
-    # 一次同步读取多个舵机，避免逐个 query_servo_angle/query_current。
-    result = manager.send_sync_servo_monitor(servo_ids)
-    states = {}
-
-    for servo_id in servo_ids:
-        monitor_data = None
-        if isinstance(result, dict):
-            monitor_data = result.get(servo_id)
-        elif result is not None and hasattr(result, "__iter__"):
-            for item in result:
-                item_id = get_attr(item, "servo_id", None)
-                if item_id is None:
-                    item_id = get_attr(item, "id", None)
-                if item_id == servo_id:
-                    monitor_data = item
-                    break
-
-        if monitor_data is None:
-            monitor_data = get_servo_from_manager(manager, servo_id)
-
-        if monitor_data is None:
-            states[int(servo_id)] = {
+    # 根据舵机 ID 和舵机数量创建共享状态。
+    @staticmethod
+    def create_shared_state_from_values(servo_ids, num_servos):
+        servos = {}
+        for servo_id in servo_ids:
+            servos[int(servo_id)] = {
                 "id": int(servo_id),
                 "angle": None,
                 "current": 0.0,
@@ -314,247 +243,412 @@ def read_sync_monitor(manager, servo_ids):
                 "power": 0.0,
                 "temp": 0.0,
                 "status": 0,
+                "turn": 0.0,
                 "online": False,
-                "stamp": time.time(),
+                "stamp": 0.0,
             }
-        else:
-            states[int(servo_id)] = build_servo_state(servo_id, monitor_data)
 
-    return states
-
-
-# 把控制线程读到的舵机状态写入共享状态。
-def update_shared_servo_state(shared_state, state_lock, new_states):
-    # 不使用 with state_lock 是为了让代码对 Python 初学者更直观：
-    # acquire() 和 release() 成对出现，finally 保证异常时也会释放锁。
-    state_lock.acquire()
-    try:
-        for servo_id, servo_state in new_states.items():
-            shared_state["servos"][int(servo_id)] = servo_state
-        shared_state["last_update"] = time.time()
-    finally:
-        state_lock.release()
-
-
-# 切换控制状态机状态。
-def set_control_state(shared_state, state_lock, new_state):
-    state_lock.acquire()
-    try:
-        shared_state["control_state"] = new_state
-    finally:
-        state_lock.release()
-
-
-# 复制一份共享状态给 ROS 线程读取。
-def copy_shared_state(shared_state, state_lock):
-    # ROS 线程发布前先复制一份快照，复制完成就释放锁。
-    # 这样发布话题不会长期占用锁，也不会阻塞控制线程读舵机。
-    state_lock.acquire()
-    try:
-        copied = {
-            "servo_ids": list(shared_state["servo_ids"]),
-            "num_servos": shared_state["num_servos"],
-            "servos": {},
-            "damping_targets": dict(shared_state["damping_targets"]),
-            "control_state": shared_state["control_state"],
-            "last_error": shared_state["last_error"],
-            "last_update": shared_state["last_update"],
+        return {
+            "servo_ids": list(servo_ids),
+            "num_servos": int(num_servos),
+            "servos": servos,
+            "damping_targets": {},
+            "control_state": STATE_IDLE,
+            "last_error": "",
+            "last_update": 0.0,
         }
+
+    # 根据当前配置创建线程共享状态。
+    def create_shared_state(self):
+        return self.create_shared_state_from_values(self.servo_ids, self.num_servos)
+
+# ROS 线程类：只负责发布 ROS 话题，不访问串口和舵机 SDK。
+class RosPublisher:
+    STATE_TOPICS = (
+        ("angle", "angle_topic", "/servo_angles"),
+        ("current", "current_topic", "/servo_currents"),
+        ("voltage", "voltage_topic", "/servo_voltages"),
+        ("power", "power_topic", "/servo_powers"),
+        ("temp", "temp_topic", "/servo_temps"),
+        ("status", "status_topic", "/servo_statuses"),
+        ("turn", "turn_topic", "/servo_turns"),
+        ("online", "online_topic", "/servo_online"),
+    )
+
+    # 保存 ROS 线程需要用到的对象。
+    def __init__(self, config, shared_state, state_lock, stop_event, rospy):
+        self.config = config
+        self.shared_state = shared_state
+        self.state_lock = state_lock
+        self.stop_event = stop_event
+        self.rospy = rospy
+
+    # 生成某个状态字段的话题数组。
+    @staticmethod
+    def make_state_array(shared_state, field_name):
+        data = []
+        for _ in range(shared_state["num_servos"]):
+            data.append(0.0)
+
         for servo_id, servo_state in shared_state["servos"].items():
-            copied["servos"][servo_id] = dict(servo_state)
-        return copied
-    finally:
-        state_lock.release()
+            if servo_id >= 0 and servo_id < len(data):
+                value = servo_state.get(field_name)
+                if value is None:
+                    value = 0.0
+                if isinstance(value, bool):
+                    value = 1.0 if value else 0.0
+                data[servo_id] = float(value)
+        return data
 
+    # 复制一份共享状态给 ROS 线程读取。
+    @staticmethod
+    def copy_shared_state(shared_state, state_lock):
+        state_lock.acquire()
+        try:
+            copied = {
+                "servo_ids": list(shared_state["servo_ids"]),
+                "num_servos": shared_state["num_servos"],
+                "servos": {},
+                "damping_targets": dict(shared_state["damping_targets"]),
+                "control_state": shared_state["control_state"],
+                "last_error": shared_state["last_error"],
+                "last_update": shared_state["last_update"],
+            }
+            for servo_id, servo_state in shared_state["servos"].items():
+                copied["servos"][servo_id] = dict(servo_state)
+            return copied
+        finally:
+            state_lock.release()
 
-# 空闲状态处理：当前不下发舵机命令。
-def handle_idle(manager, config, shared_state, state_lock):
-    # 后续可以在这里处理待机、安全释放等逻辑。
-    return
+    # 创建每类舵机状态对应的 ROS 数组发布器。
+    @staticmethod
+    def create_publishers(rospy, config):
+        publishers = {}
+        for field_name, config_key, default_topic in RosPublisher.STATE_TOPICS:
+            topic = config.get(config_key, default_topic)
+            publishers[field_name] = rospy.Publisher(topic, Float64MultiArray, queue_size=10)
+        return publishers
 
+    # 把所有舵机状态按字段分别发布成数组。
+    @staticmethod
+    def publish_state_arrays(publishers, shared_state):
+        for field_name in publishers:
+            publishers[field_name].publish(Float64MultiArray(data=RosPublisher.make_state_array(shared_state, field_name)))
 
-# 手动控制状态处理：预留给单关节调试或手动目标角。
-def handle_manual(manager, config, shared_state, state_lock):
-    # 后续可以从命令队列取单个舵机目标角，并调用 set_servo_angle。
-    return
+    # ROS 发布线程的主循环。
+    def run(self):
+        publishers = self.create_publishers(self.rospy, self.config)
+        rate = self.rospy.Rate(self.config["rate"])
 
+        while not self.stop_event.is_set() and not self.rospy.is_shutdown():
+            state_copy = self.copy_shared_state(self.shared_state, self.state_lock)
+            self.publish_state_arrays(publishers, state_copy)
+            rate.sleep()
 
-# 规划状态处理：预留给机械臂逆解或轨迹准备。
-def handle_plan(manager, config, shared_state, state_lock):
-    # 当前的“逆解”只做末端合阻尼到切向舵机的分配。
-    arm_params = config.get("arm_params")
-    if arm_params is None:
+# 控制线程类：唯一访问串口和 UartServoManager 的地方。
+class Controller:
+    # 保存控制线程需要用到的对象。
+    def __init__(self, config, shared_state, state_lock, stop_event, rospy):
+        self.config = config
+        self.shared_state = shared_state
+        self.state_lock = state_lock
+        self.stop_event = stop_event
+        self.rospy = rospy
+        self.uart = None
+        self.manager = None
+
+    # 安全读取对象属性，同时兼容对象和字典。
+    @staticmethod
+    def get_attr(obj, name, default_value):
+        # 官方 SDK 返回的数据有可能是对象，也有可能是字典。
+        # 字典读取用 obj.get("字段名")，对象读取用 getattr(obj, "属性名")。
+        if isinstance(obj, dict):
+            return obj.get(name, default_value)
+        return getattr(obj, name, default_value)
+
+    # 把官方同步监控数据转换成普通字典，供共享状态和状态机使用。
+    @staticmethod
+    def build_servo_state(servo_id, monitor_data):
+        angle = Controller.get_attr(monitor_data, "angle_monitor", None)
+        if angle is None:
+            angle = Controller.get_attr(monitor_data, "angle", None)
+
+        return {
+            "id": int(servo_id),
+            "angle": None if angle is None else float(angle),
+            "current": float(Controller.get_attr(monitor_data, "current", 0.0)),
+            "voltage": float(Controller.get_attr(monitor_data, "voltage", 0.0)),
+            "power": float(Controller.get_attr(monitor_data, "power", 0.0)),
+            "temp": float(Controller.get_attr(monitor_data, "temp", 0.0)),
+            "status": int(Controller.get_attr(monitor_data, "status", 0)),
+            "turn": float(Controller.get_attr(monitor_data, "turn", 0.0)),
+            "online": angle is not None,
+            "stamp": time.time(),
+        }
+
+    # 从官方 SDK 管理器缓存里取单个舵机对象。
+    @staticmethod
+    def get_servo_from_manager(manager, servo_id):
+        if not hasattr(manager, "servos"):
+            return None
+
+        servos = manager.servos
+        if hasattr(servos, "get"):
+            return servos.get(servo_id)
+
+        try:
+            return servos[servo_id]
+        except Exception:
+            return None
+
+    # 打开串口并创建官方 SDK 管理器。
+    @staticmethod
+    def open_servo_manager(config):
+        uart = serial.Serial(
+            port=config["port"],
+            baudrate=config["baudrate"],
+            parity=serial.PARITY_NONE,
+            stopbits=1,
+            bytesize=8,
+            timeout=config["timeout"],
+        )
+        manager = uservo.UartServoManager(uart)
+        return uart, manager
+
+    # 使用官方同步读取 API 读取一组舵机状态。
+    @staticmethod
+    def read_sync_monitor(manager, servo_ids):
+        result = manager.send_sync_servo_monitor(servo_ids)
+        states = {}
+
+        for servo_id in servo_ids:
+            monitor_data = None
+            if isinstance(result, dict):
+                monitor_data = result.get(servo_id)
+                if monitor_data is None:
+                    raise RuntimeError("舵机 %d 同步监控读取失败" % int(servo_id))
+            elif result is not None and hasattr(result, "__iter__"):
+                for item in result:
+                    item_id = Controller.get_attr(item, "servo_id", None)
+                    if item_id is None:
+                        item_id = Controller.get_attr(item, "id", None)
+                    if item_id == servo_id:
+                        monitor_data = item
+                        break
+
+            if monitor_data is None:
+                monitor_data = Controller.get_servo_from_manager(manager, servo_id)
+
+            if monitor_data is None:
+                raise RuntimeError("舵机 %d 同步监控读取失败" % int(servo_id))
+
+            states[int(servo_id)] = Controller.build_servo_state(servo_id, monitor_data)
+
+        return states
+
+    # 把控制线程读到的舵机状态写入共享状态。
+    @staticmethod
+    def update_shared_servo_state(shared_state, state_lock, new_states):
+        # shared_state 是 ROS 线程和控制线程共用的字典。
+        # 只要要写它，就先 acquire() 加锁，写完 finally 里 release() 解锁。
+        state_lock.acquire()
+        try:
+            for servo_id, servo_state in new_states.items():
+                shared_state["servos"][int(servo_id)] = servo_state
+            shared_state["last_update"] = time.time()
+        finally:
+            state_lock.release()
+
+    # 切换控制状态机状态。
+    @staticmethod
+    def set_control_state(shared_state, state_lock, new_state):
+        state_lock.acquire()
+        try:
+            shared_state["control_state"] = new_state
+        finally:
+            state_lock.release()
+
+    # 空闲状态处理：当前不下发舵机命令。
+    def handle_idle(self, manager):
         return
 
-    damping_targets = distribute_end_damping(config.get("end_damping", 0.0), arm_params)
+    # 手动控制状态处理：预留给单关节调试或手动目标角。
+    def handle_manual(self, manager):
+        return
 
-    state_lock.acquire()
-    try:
-        shared_state["damping_targets"] = damping_targets
-    finally:
-        state_lock.release()
+    # 规划状态处理：预留给后续逆解、DH 表和控制算法。
+    def handle_plan(self, manager):
+        return
 
+    # 运动执行状态处理：预留给正式运动控制。
+    def handle_move(self, manager):
+        return
 
-# 运动执行状态处理：预留给正式运动控制。
-def handle_move(manager, config, shared_state, state_lock):
-    # 后续根据规划结果选择控制方案，并下发舵机角度命令。
-    return
+    # 保持状态处理：预留给位置保持或锁定当前位置。
+    def handle_hold(self, manager):
+        return
 
+    # 错误保护状态处理：预留给停机、释放或等待人工复位。
+    def handle_error(self, manager):
+        return
 
-# 保持状态处理：预留给位置保持或锁定当前位置。
-def handle_hold(manager, config, shared_state, state_lock):
-    # 后续可以锁定当前位置，或周期性修正目标角。
-    return
-
-
-# 错误保护状态处理：预留给停机、释放或等待人工复位。
-def handle_error(manager, config, shared_state, state_lock):
-    # 后续可以在这里释放舵机、停止运动或等待人工复位。
-    return
-
-
-# 执行一次控制状态机分发。
-def run_state_machine_once(manager, config, shared_state, state_lock):
-    # 先把当前状态读出来，再释放锁。
-    # 各状态处理函数如果需要读写共享状态，会自己加锁。
-    state_lock.acquire()
-    try:
-        current_state = shared_state["control_state"]
-    finally:
-        state_lock.release()
-
-    # 状态分发保持 if/elif 的形式，方便后续直接在对应函数里补控制策略。
-    if current_state == STATE_IDLE:
-        handle_idle(manager, config, shared_state, state_lock)
-    elif current_state == STATE_MANUAL:
-        handle_manual(manager, config, shared_state, state_lock)
-    elif current_state == STATE_PLAN:
-        handle_plan(manager, config, shared_state, state_lock)
-    elif current_state == STATE_MOVE:
-        handle_move(manager, config, shared_state, state_lock)
-    elif current_state == STATE_HOLD:
-        handle_hold(manager, config, shared_state, state_lock)
-    elif current_state == STATE_ERROR:
-        handle_error(manager, config, shared_state, state_lock)
-    else:
-        set_control_state(shared_state, state_lock, STATE_ERROR)
-
-
-# 释放所有舵机。
-def release_servos(manager, servo_ids):
-    # method=0x10, power=0 来自官方示例，含义是停止并释放控制。
-    for servo_id in servo_ids:
+    # 执行一次控制状态机分发。
+    def run_state_machine_once(self, manager):
+        # 这里只拿锁读取 control_state，读完马上释放。
+        # 不要拿着锁去执行 handle_xxx()，否则 ROS 线程可能等太久。
+        self.state_lock.acquire()
         try:
-            manager.stop_on_control_mode(int(servo_id), method=0x10, power=0)
-        except Exception:
-            pass
+            current_state = self.shared_state["control_state"]
+        finally:
+            self.state_lock.release()
 
+        if current_state == STATE_IDLE:
+            self.handle_idle(manager)
+        elif current_state == STATE_MANUAL:
+            self.handle_manual(manager)
+        elif current_state == STATE_PLAN:
+            self.handle_plan(manager)
+        elif current_state == STATE_MOVE:
+            self.handle_move(manager)
+        elif current_state == STATE_HOLD:
+            self.handle_hold(manager)
+        elif current_state == STATE_ERROR:
+            self.handle_error(manager)
+        else:
+            self.set_control_state(self.shared_state, self.state_lock, STATE_ERROR)
 
-# 控制线程入口，本线程是唯一访问舵机 SDK 的线程。
-def control_thread_main(config, shared_state, state_lock, stop_event, rospy):
-    # 控制线程是唯一访问 UartServoManager 的线程。
-    # ROS 线程只读 shared_state，不碰串口，避免串口读写交叉。
-    uart = None
-    manager = None
-    rate_delay = 1.0 / float(config["rate"])
-
-    try:
-        uart, manager = open_servo_manager(config)
-        rospy.loginfo("舵机串口已打开: %s @ %d", config["port"], config["baudrate"])
-
-        while not stop_event.is_set() and not rospy.is_shutdown():
+    # 释放所有舵机。
+    def release_servos(self, manager):
+        for servo_id in self.config["servo_ids"]:
             try:
-                # 1. 同步读取所有舵机状态。
-                new_states = read_sync_monitor(manager, config["servo_ids"])
-                # 2. 写入共享状态，供 ROS 线程发布。
-                update_shared_servo_state(shared_state, state_lock, new_states)
-                # 3. 根据当前运动状态执行一轮控制逻辑。
-                run_state_machine_once(manager, config, shared_state, state_lock)
-            except Exception as exc:
-                state_lock.acquire()
-                try:
-                    shared_state["last_error"] = str(exc)
-                    shared_state["control_state"] = STATE_ERROR
-                finally:
-                    state_lock.release()
-                rospy.logerr("控制线程异常: %s", exc)
-
-            time.sleep(rate_delay)
-    finally:
-        if manager is not None and config["release_on_shutdown"]:
-            release_servos(manager, config["servo_ids"])
-        if uart is not None:
-            try:
-                uart.close()
+                manager.stop_on_control_mode(int(servo_id), method=0x10, power=0)
             except Exception:
                 pass
 
+    # 控制线程主循环。
+    def run(self):
+        # rate 是每秒循环次数。
+        # 例如 rate=50，则每轮间隔 1/50 = 0.02 秒。
+        rate_delay = 1.0 / float(self.config["rate"])
 
-# ROS 发布线程入口。
-def ros_thread_main(config, shared_state, state_lock, stop_event, rospy):
-    # ROS 相关 import 放在线程函数里，Windows 上导入本文件跑测试时不需要 ROS。
-    from std_msgs.msg import Float64MultiArray
+        try:
+            # 串口和舵机管理器只在控制线程里打开。
+            # ROS 线程不碰这些对象，避免两个线程同时读写串口。
+            try:
+                self.uart, self.manager = self.open_servo_manager(self.config)
+            except Exception as exc:
+                self.record_error(exc)
+                self.stop_event.set()
+                self.rospy.logerr("舵机串口打开失败: %s", exc)
+                return
+            self.rospy.loginfo("舵机串口已打开: %s @ %d", self.config["port"], self.config["baudrate"])
 
-    angle_pub = rospy.Publisher(config["angle_topic"], Float64MultiArray, queue_size=10)
-    current_pub = None
-    if config["read_current"]:
-        current_pub = rospy.Publisher(config["current_topic"], Float64MultiArray, queue_size=10)
+            while not self.stop_event.is_set() and not self.rospy.is_shutdown():
+                try:
+                    new_states = self.read_sync_monitor(self.manager, self.config["servo_ids"])
+                    self.update_shared_servo_state(self.shared_state, self.state_lock, new_states)
+                    self.run_state_machine_once(self.manager)
+                except Exception as exc:
+                    self.record_error(exc)
+                    self.stop_event.set()
+                    self.rospy.logerr("控制线程异常: %s", exc)
+                    return
 
-    rate = rospy.Rate(config["rate"])
-    rospy.loginfo("角度话题发布到: %s", config["angle_topic"])
+                time.sleep(rate_delay)
+        finally:
+            if self.manager is not None and self.config["release_on_shutdown"]:
+                self.release_servos(self.manager)
+            if self.uart is not None:
+                try:
+                    self.uart.close()
+                except Exception:
+                    pass
 
-    while not stop_event.is_set() and not rospy.is_shutdown():
-        # 发布线程只发布最近一帧共享状态，不主动读取硬件。
-        state_copy = copy_shared_state(shared_state, state_lock)
-        angle_pub.publish(Float64MultiArray(data=make_angle_array(state_copy)))
-        if current_pub is not None:
-            current_pub.publish(Float64MultiArray(data=make_current_array(state_copy)))
-        rate.sleep()
-
+    # 记录控制线程错误并切换到 ERROR 状态。
+    def record_error(self, exc):
+        self.state_lock.acquire()
+        try:
+            self.shared_state["last_error"] = str(exc)
+            self.shared_state["control_state"] = STATE_ERROR
+        finally:
+            self.state_lock.release()
 
 # 启动一个后台线程。
 def start_thread(name, target, args):
-    # daemon=True 表示主程序退出时不会被后台线程卡住。
-    # main 里仍然会主动 join 一小段时间，尽量让串口正常关闭。
     thread = threading.Thread(name=name, target=target, args=args)
     thread.daemon = True
     thread.start()
     return thread
 
-
 # 程序入口，负责装配线程和管理生命周期。
 def main():
-    # main 线程只负责装配和生命周期，不写控制算法。
-    # 控制算法统一放到 control_thread_main 和各 handle_xxx 函数里。
-    import rospy
-
+    # 初始化 ROS 节点。
+    # 节点名是 hxj_duoji_node，后面 ROS 运行时会用到这个名字。
     rospy.init_node("hxj_duoji_node")
-    config = read_ros_config(rospy)
-    if config["arm_config"] != "":
-        config["arm_params"] = load_arm_params(config["arm_config"])
-    shared_state = create_shared_state(config["servo_ids"], config["num_servos"])
+
+    # 创建配置读取对象。
+    # DuojiConfig 会做两件事：
+    # 1. 使用下面这组手动设置的串口、舵机 ID、频率、话题名等参数。
+    # 2. 默认读取 config/example.json，把机械臂参数放进 config["arm_params"]。
+    config_reader = DuojiConfig(
+        port="/dev/ttyUSB0",
+        baudrate=115200,
+        timeout=0.0,
+        servo_ids=[0, 1, 2, 3, 4, 5, 6],
+        num_servos=7,
+        rate=50.0,
+        angle_topic="/servo_angles",
+        current_topic="/servo_currents",
+        release_on_shutdown=False,
+        arm_config=None,
+        end_damping=0.0,
+    )
+
+    # config 是一个普通字典。
+    # 后面的 RosPublisher 和 Controller 都共用这一份配置。
+    config = config_reader.values
+
+    # 创建线程共享状态。
+    shared_state = config_reader.create_shared_state()
+
+    # 是线程锁。
     state_lock = threading.Lock()
+
+    # 停止信号。
     stop_event = threading.Event()
 
-    ros_thread = start_thread(
-        "ros_thread",
-        ros_thread_main,
-        (config, shared_state, state_lock, stop_event, rospy),
-    )
-    control_thread = start_thread(
-        "control_thread",
-        control_thread_main,
-        (config, shared_state, state_lock, stop_event, rospy),
-    )
+    # 创建 ROS 线程对象。
+    ros_publisher = RosPublisher(config, shared_state, state_lock, stop_event, rospy)
+
+    # 创建控制线程对象。
+    controller = Controller(config, shared_state, state_lock, stop_event, rospy)
+
+    # 启动 ROS 发布线程。
+    ros_thread = start_thread("ros_thread", ros_publisher.run, ())
+
+    # 启动控制线程。
+    control_thread = start_thread("control_thread", controller.run, ())
 
     try:
+        # main 主线程不做具体控制，只负责活着等待。
+        # 只要 ROS 没有关闭，就每 0.2 秒睡一下，避免空转占 CPU。
         while not rospy.is_shutdown():
             time.sleep(0.2)
     except KeyboardInterrupt:
+        # 如果用户按 Ctrl+C，会进入这里。
+        # 这里不直接做复杂处理，交给 finally 统一通知线程退出。
         pass
     finally:
+        # 通知两个子线程准备退出。
         stop_event.set()
+
+        # 等 ROS 线程最多 2 秒。
+        # join() 的意思是等待线程结束。
+        # 写 2.0 是为了避免某个线程卡住时，主程序永远退不出去。
         ros_thread.join(2.0)
+
+        # 等控制线程最多 2 秒。
+        # 控制线程退出时会在自己的 finally 里关闭串口。
         control_thread.join(2.0)
 
 

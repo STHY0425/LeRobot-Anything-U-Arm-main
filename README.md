@@ -23,7 +23,8 @@ hxj_duoji_node.py
 
 ```text
 feel_force_duoji/
-  hxj_duoji_node.py              # 单文件 ROS 节点和控制状态机框架
+  config/example.json           # 机械臂参数 JSON 示例，默认会读取这个文件
+  hxj_duoji_node.py              # 单文件 ROS 节点、配置类、ROS 线程类、控制线程类
   tests/test_hxj_duoji_node.py   # 不依赖 ROS/硬件的本地测试
 ```
 
@@ -35,23 +36,47 @@ feel_force_duoji/
 ```text
 main 主线程
   -> 初始化 ROS
-  -> 读取参数
+  -> 创建 DuojiConfig
   -> 创建共享状态和线程锁
-  -> 启动 ROS 线程
+  -> 创建 RosWorker
+  -> 创建 ControlWorker
+  -> 启动 ROS 发布线程
   -> 启动控制线程
   -> 等待退出并关闭线程
 
-ROS 线程
+`DuojiConfig` 配置类
+  -> 读取 ROS 参数
+  -> 默认读取 config/example.json
+  -> 把 JSON 内容放到 config["arm_params"]
+  -> 创建 shared_state
+
+`RosWorker` ROS 线程类
   -> 读取共享状态快照
   -> 发布 /servo_angles
   -> 可选发布 /servo_currents
 
-控制线程
+`ControlWorker` 控制线程类
   -> 打开 serial.Serial
   -> 创建 UartServoManager
   -> 调用 send_sync_servo_monitor(servo_ids)
   -> 更新共享状态
   -> 执行控制状态机
+```
+
+## 类职责
+
+```text
+DuojiConfig
+  负责读 ROS 参数和 config/example.json。
+  后续如果新增配置项，优先改这个类。
+
+RosWorker
+  负责 ROS 发布。
+  这个类不碰串口、不碰 UartServoManager。
+
+ControlWorker
+  负责串口、官方舵机 API、同步读取、控制状态机。
+  后续不同运动状态下的控制方案，优先写到这个类的 handle_xxx() 方法里。
 ```
 
 ## 控制状态机
@@ -67,15 +92,15 @@ HOLD    保持预留
 ERROR   错误保护
 ```
 
-后续主要补这些函数：
+后续主要补 `ControlWorker` 里的这些方法：
 
 ```python
-handle_idle()
-handle_manual()
-handle_plan()
-handle_move()
-handle_hold()
-handle_error()
+ControlWorker.handle_idle()
+ControlWorker.handle_manual()
+ControlWorker.handle_plan()
+ControlWorker.handle_move()
+ControlWorker.handle_hold()
+ControlWorker.handle_error()
 ```
 
 ## 末端合阻尼分配
@@ -125,7 +150,7 @@ joint3 weight = 0.10              -> servo 2 = 285.7143
 ~current_topic        默认 /servo_currents
 ~read_current         默认 false
 ~release_on_shutdown  默认 false
-~arm_config           默认空，机械臂 JSON 文件路径
+~arm_config           默认 config/example.json，机械臂 JSON 文件路径
 ~end_damping          默认 0.0，末端合阻尼
 ```
 
@@ -142,8 +167,13 @@ rosrun uarm hxj_duoji_node.py \
   _servo_ids:="[0,1,2,3,4,5,6]" \
   _num_servos:=7 \
   _rate:=50 \
-  _arm_config:=/absolute/path/to/example.json \
   _end_damping:=1000
+```
+
+如果要临时换另一套机械臂参数，可以再额外传：
+
+```bash
+_arm_config:=/absolute/path/to/other_arm.json
 ```
 
 查看角度：
