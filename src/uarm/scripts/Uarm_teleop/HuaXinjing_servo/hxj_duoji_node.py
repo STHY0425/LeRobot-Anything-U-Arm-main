@@ -30,13 +30,8 @@ import fashionstar_uart_sdk as uservo # type: ignore
 
 
 # 控制状态机的状态名。
-#
-# 状态机可以理解成：程序每一轮先看自己现在是什么状态，
-# 然后进入对应的 handle_xxx() 方法执行一小段逻辑。
 STATE_START = "START"      # 启动：同步回零 + 终端交互，等待用户选择目标状态
 STATE_IDLE = "IDLE"        # 空闲：不主动下发运动命令
-STATE_PLAN = "PLAN"        # 规划：预留给逆解、DH 表和控制算法
-STATE_MOVE = "MOVE"        # 运动：预留给正式运动控制
 STATE_HOLD = "HOLD"        # 阻尼保持：3D 三档动态阻尼控制（核心）
 STATE_LOCKED = "LOCKED"    # 锁死：所有舵机保持锁力，完全固定
 STATE_ERROR = "ERROR"      # 错误：预留给停机、释放、等待人工处理
@@ -110,15 +105,11 @@ class ServoConfig:
         release_on_shutdown=False,
         arm_config=None,
         end_damping=DEFAULTS["end_damping"],
-        # 三档末端合阻尼预算（mW）
         end_damping_low=DEFAULTS["end_damping_low"],
         end_damping_mid=DEFAULTS["end_damping_mid"],
         end_damping_high=DEFAULTS["end_damping_high"],
-        # 轴向舵机的固定基础阻尼功率（mW），不参与末端阻尼分发。
         base_damping_power=DEFAULTS["base_damping_power"],
-        # 单个舵机阻尼功率的硬上限（mW）。
         max_damping_power=DEFAULTS["max_damping_power"],
-        # 顺逆重力判定阈值（m/s）。
         vz_threshold=DEFAULTS["vz_threshold"],
     ):
         # servo_ids 和 num_servos 默认不传，由 JSON 的 dof 动态决定。
@@ -179,9 +170,6 @@ class ServoConfig:
     # 读取机械臂 JSON 参数文件。
     @staticmethod
     def load_arm_params_file(path):
-        # staticmethod 表示这个方法不需要使用 self。
-        # 这样既能放在类里面，又能写成 ServoConfig.load_arm_params_file(path)。
-        # 这里使用 staticmethod，是因为“读取某个路径的 JSON”不依赖某一个对象内部状态。
 
         # with open(...) as file_obj 会在读取结束后自动关闭文件。
         # encoding="utf-8" 用来避免 Windows 上读取中文注释或中文字段时乱码。
@@ -351,6 +339,10 @@ class ServoConfig:
             "control_state": STATE_START,
             "last_error": "",
             "last_update": 0.0,
+            # 遥测字段：由 Controller 写入，RosPublisher 读取发布。
+            "end_velocity": [0.0, 0.0, 0.0],  # [vx, vy, vz] m/s
+            "damping_mode": 0,                 # 0=非HOLD, 1=low, 2=mid, 3=high
+            "damping_powers": {},              # {servo_id: power_mW}
         }
 
     # 根据当前配置创建线程共享状态。
@@ -368,6 +360,13 @@ class RosPublisher:
         ("status", "status_topic", "/servo_statuses"),
         ("turn", "turn_topic", "/servo_turns"),
         ("online", "online_topic", "/servo_online"),
+    )
+
+    # 遥测话题：数据不在 servos 子表里，独立发布。
+    TELEMETRY_TOPICS = (
+        ("end_velocity", "/servo_end_velocity"),    # [vx, vy, vz] m/s
+        ("damping_mode", "/servo_damping_mode"),    # [mode] 0/1/2/3
+        ("damping_powers", "/servo_damping_powers"), # [pw0, pw1, ...] mW
     )
 
     # 保存 ROS 线程需要用到的对象。
@@ -407,6 +406,10 @@ class RosPublisher:
                 "control_state": shared_state["control_state"],
                 "last_error": shared_state["last_error"],
                 "last_update": shared_state["last_update"],
+                # 遥测字段一并拷贝，避免 ROS 线程读到脏数据。
+                "end_velocity": list(shared_state.get("end_velocity", [0.0, 0.0, 0.0])),
+                "damping_mode": shared_state.get("damping_mode", 0),
+                "damping_powers": dict(shared_state.get("damping_powers", {})),
             }
             for servo_id, servo_state in shared_state["servos"].items():
                 copied["servos"][servo_id] = dict(servo_state)
@@ -429,14 +432,45 @@ class RosPublisher:
         for field_name in publishers:
             publishers[field_name].publish(Float64MultiArray(data=RosPublisher.make_state_array(shared_state, field_name)))
 
+    # 创建遥测话题对应的 ROS 发布器。
+    @staticmethod
+    def create_telemetry_publishers(rospy):
+        publishers = {}
+        for field_name, default_topic in RosPublisher.TELEMETRY_TOPICS:
+            publishers[field_name] = rospy.Publisher(default_topic, Float64MultiArray, queue_size=10)
+        return publishers
+
+    # 发布遥测数据（末端速度、阻尼档位、阻尼功率）。
+    @staticmethod
+    def publish_telemetry(telemetry_pubs, shared_state):
+        # 末端速度 [vx, vy, vz]
+        telemetry_pubs["end_velocity"].publish(
+            Float64MultiArray(data=list(shared_state.get("end_velocity", [0.0, 0.0, 0.0])))
+        )
+        # 阻尼档位 [mode]
+        telemetry_pubs["damping_mode"].publish(
+            Float64MultiArray(data=[float(shared_state.get("damping_mode", 0))])
+        )
+        # 阻尼功率，按 servo_id 索引排列
+        num = shared_state["num_servos"]
+        pw_data = [0.0] * num
+        for sid, pw in shared_state.get("damping_powers", {}).items():
+            if 0 <= sid < num:
+                pw_data[sid] = float(pw)
+        telemetry_pubs["damping_powers"].publish(
+            Float64MultiArray(data=pw_data)
+        )
+
     # ROS 发布线程的主循环。
     def run(self):
         publishers = self.create_publishers(self.rospy, self.config)
+        telemetry_pubs = self.create_telemetry_publishers(self.rospy)
         rate = self.rospy.Rate(self.config["rate"])
 
         while not self.stop_event.is_set() and not self.rospy.is_shutdown():
             state_copy = self.copy_shared_state(self.shared_state, self.state_lock)
             self.publish_state_arrays(publishers, state_copy)
+            self.publish_telemetry(telemetry_pubs, state_copy)
             rate.sleep()
 
 # 控制线程类：唯一访问串口和 UartServoManager 的地方。
@@ -653,14 +687,6 @@ class Controller:
     def handle_idle(self, manager):
         return
 
-    # 规划状态处理：预留给后续逆解、DH 表和控制算法。
-    def handle_plan(self, manager):
-        return
-
-    # 运动执行状态处理：预留给正式运动控制。
-    def handle_move(self, manager):
-        return
-
     # 阻尼保持状态：3D 三档动态阻尼控制（核心）。
     # 每周期根据末端 3D 速度的 z 分量（vz）判断顺逆重力，
     # 切向关节分低/中/高三档阻尼，轴向关节固定基础阻尼。
@@ -703,20 +729,21 @@ class Controller:
 
         if current_state == STATE_START:
             self.handle_start(manager)
+            self._clear_telemetry()
         elif current_state == STATE_IDLE:
             self.handle_idle(manager)
-        elif current_state == STATE_PLAN:
-            self.handle_plan(manager)
-        elif current_state == STATE_MOVE:
-            self.handle_move(manager)
+            self._clear_telemetry()
         elif current_state == STATE_HOLD:
             self.handle_hold(manager)
         elif current_state == STATE_LOCKED:
             self.handle_locked(manager)
+            self._clear_telemetry()
         elif current_state == STATE_ERROR:
             self.handle_error(manager)
+            self._clear_telemetry()
         else:
             self.set_control_state(self.shared_state, self.state_lock, STATE_ERROR)
+            self._clear_telemetry()
 
     # 释放所有舵机。
     def release_servos(self, manager):
@@ -891,12 +918,33 @@ class Controller:
         # 归一化权重 × 预算。
         return end_damping * (norms / total)
 
+    # 把遥测数据写入共享状态（末端速度、阻尼档位、阻尼功率）。
+    # 一次锁写入三个字段，减少锁竞争。
+    def _write_telemetry(self, v_end, mode_code, damping_powers):
+        self.state_lock.acquire()
+        try:
+            self.shared_state["end_velocity"] = [float(v_end[0]), float(v_end[1]), float(v_end[2])]
+            self.shared_state["damping_mode"] = int(mode_code)
+            self.shared_state["damping_powers"] = dict(damping_powers)
+        finally:
+            self.state_lock.release()
+
+    # 非 HOLD 状态时清零遥测，避免脏数据残留。
+    def _clear_telemetry(self):
+        self.state_lock.acquire()
+        try:
+            self.shared_state["end_velocity"] = [0.0, 0.0, 0.0]
+            self.shared_state["damping_mode"] = 0
+            self.shared_state["damping_powers"] = {}
+        finally:
+            self.state_lock.release()
+
     # ===== 三档动态阻尼 =====
     # 执行一次完整的 3D 动态阻尼解算和下发。
     # 这是控制线程在 HOLD 状态下每周期调用的主方法。
     # 流程：
     # 1. 分类关节 → 2. 构建 3D DH → 3. 读角度 → 4. 3D FK → 5. 3D Jacobian
-    # 6. 角度差分 → 末端速度 vz → 判断顺逆重力 → 三档切换 → 下发
+    # 6. 角度差分 → 末端速度 vz → 判断顺逆重力 → 三档切换 → 下发 → 写遥测
     def apply_dynamic_damping(self, manager):
         arm = self.config.get("arm_params")
         if arm is None:
@@ -949,11 +997,8 @@ class Controller:
         v_end = J_3d @ omegas
         vz = v_end[2]
 
-        # 8. 三档末端合阻尼预算（mW），每档一个固定值，调试时改 DEFAULTS。
+        # 8. 三档末端合阻尼预算（mW）
         # 三档是末端总预算，切向关节按雅可比列范数权重分发这个预算。
-        # 低档：逆重力（上抬）时用，值小，用户推起来不费力。
-        # 中档：水平/静止时用，正常手感。
-        # 高档：顺重力（下坠）时用，值大，托住机械臂。
         end_damping_low = self.config.get("end_damping_low", DEFAULTS["end_damping_low"])
         end_damping_mid = self.config.get("end_damping_mid", DEFAULTS["end_damping_mid"])
         end_damping_high = self.config.get("end_damping_high", DEFAULTS["end_damping_high"])
@@ -966,16 +1011,36 @@ class Controller:
             manager.set_damping(sid, base_pw)
 
         # 10. 切向舵机：三档末端预算，按雅可比权重分发到各关节。
+        # 先确定档位码（0=非HOLD后的默认, 1=low, 2=mid, 3=high）。
+        if vz > vz_threshold:
+            mode_code = 1
+        elif vz < -vz_threshold:
+            mode_code = 3
+        else:
+            mode_code = 2
+
+        # 收集每个舵机的目标阻尼功率，写入遥测。
+        damping_powers = {}
+        for sid in axial_ids:
+            damping_powers[sid] = base_pw
+
         if not tangential_ids:
+            # 没有切向关节，只记轴向功率，下发后直接返回。
+            for sid in axial_ids:
+                manager.set_damping(sid, damping_powers[sid])
+            self._write_telemetry(v_end, mode_code, damping_powers)
+            # 保存本周期角度和时间戳，供下周期差分使用。
+            self.prev_angles = current_angles
+            self.prev_timestamp = current_time
             return
 
         # 提取切向列 → 阻尼分发只用切向列，轴向列不参与。
         J_tan = self.extract_tangential_jacobian(J_3d, tangential_indices)
 
-        if vz > vz_threshold:
+        if mode_code == 1:
             # 低档：逆重力（末端向上），固定低预算。
             weights = self.distribute_damping_3d(J_tan, end_damping_low)
-        elif vz < -vz_threshold:
+        elif mode_code == 3:
             # 高档：顺重力（末端向下），固定高预算。
             weights = self.distribute_damping_3d(J_tan, end_damping_high)
         else:
@@ -984,21 +1049,22 @@ class Controller:
 
         for i, sid in enumerate(tangential_ids):
             pw = int(min(weights[i], max_pw))
+            damping_powers[sid] = pw
             manager.set_damping(sid, pw)
 
-        # 11. 保存本周期角度和时间戳，供下周期差分使用。
+        # 11. 写入遥测数据到共享状态。
+        self._write_telemetry(v_end, mode_code, damping_powers)
+
+        # 12. 保存本周期角度和时间戳，供下周期差分使用。
         self.prev_angles = current_angles
         self.prev_timestamp = current_time
 
     # 控制线程主循环。
     def run(self):
-        # rate 是每秒循环次数。
-        # 例如 rate=50，则每轮间隔 1/50 = 0.02 秒。
         rate_delay = 1.0 / float(self.config["rate"])
 
         try:
             # 串口和舵机管理器只在控制线程里打开。
-            # ROS 线程不碰这些对象，避免两个线程同时读写串口。
             try:
                 self.uart, self.manager = self.open_servo_manager(self.config)
             except Exception as exc:
@@ -1009,8 +1075,6 @@ class Controller:
             self.rospy.loginfo("舵机串口已打开: %s @ %d", self.config["port"], self.config["baudrate"])
 
             # 启动时默认进入 START 状态：同步回零 + 终端交互。
-            # 用户在终端选择目标状态（HOLD / LOCKED / IDLE）后自动切换。
-            # shared_state 初始已是 STATE_START，这里仅打印日志。
             self.rospy.loginfo("启动状态: STATE_START（同步回零 + 终端交互）")
 
             while not self.stop_event.is_set() and not self.rospy.is_shutdown():
@@ -1053,15 +1117,9 @@ def start_thread(name, target, args):
 # 程序入口，负责装配线程和管理生命周期。
 def main():
     # 初始化 ROS 节点。
-    # 节点名是 hxj_duoji_node，后面 ROS 运行时会用到这个名字。
     rospy.init_node("hxj_duoji_node")
 
     # 创建配置读取对象。
-    # ServoConfig 会做两件事：
-    # 1. 使用下面这组手动设置的串口、频率、话题名等参数。
-    # 2. 默认读取 config/example.json，把机械臂参数放进 config["arm_params"]。
-    #    servo_ids 和 num_servos 不传，由 JSON 的 dof 自动派生：
-    #    dof=3 → servo_ids=[0,1,2], num_servos=3。
     config_reader = ServoConfig(
         port="/dev/ttyUSB0",
         baudrate=115200,
@@ -1073,28 +1131,23 @@ def main():
         arm_config=None,
     )
 
-    # config 是一个普通字典。
     # 后面的 RosPublisher 和 Controller 都共用这一份配置。
     config = config_reader.values
 
     # 创建线程共享状态。
     shared_state = config_reader.create_shared_state()
-
-    # 是线程锁。
+    # 线程锁。
     state_lock = threading.Lock()
-
     # 停止信号。
     stop_event = threading.Event()
 
     # 创建 ROS 线程对象。
     ros_publisher = RosPublisher(config, shared_state, state_lock, stop_event, rospy)
-
     # 创建控制线程对象。
     controller = Controller(config, shared_state, state_lock, stop_event, rospy)
 
     # 启动 ROS 发布线程。
     ros_thread = start_thread("ros_thread", ros_publisher.run, ())
-
     # 启动控制线程。
     control_thread = start_thread("control_thread", controller.run, ())
 
@@ -1104,20 +1157,13 @@ def main():
         while not rospy.is_shutdown():
             time.sleep(0.2)
     except KeyboardInterrupt:
-        # 如果用户按 Ctrl+C，会进入这里。
-        # 这里不直接做复杂处理，交给 finally 统一通知线程退出。
         pass
     finally:
-        # 通知两个子线程准备退出。
         stop_event.set()
 
-        # 等 ROS 线程最多 2 秒。
-        # join() 的意思是等待线程结束。
-        # 写 2.0 是为了避免某个线程卡住时，主程序永远退不出去。
+        # join() 等待线程结束，写 2.0 是为了避免某个线程卡住时，主程序永远退不出去。
         ros_thread.join(2.0)
 
-        # 等控制线程最多 2 秒。
-        # 控制线程退出时会在自己的 finally 里关闭串口。
         control_thread.join(2.0)
 
 

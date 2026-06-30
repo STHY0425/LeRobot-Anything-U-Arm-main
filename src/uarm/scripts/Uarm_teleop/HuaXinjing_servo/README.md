@@ -127,8 +127,6 @@ DEFAULTS = {
 | IDLE | 空闲，不下发命令 |
 | HOLD | 阻尼控制（核心），3D 三档动态阻尼 |
 | LOCKED | 锁死，所有舵机保持锁力（`stop_on_control_mode(method=0x11)`） |
-| MOVE | 预留 |
-| PLAN | 预留 |
 | ERROR | 停机释放 |
 
 LOCKED 触发通过 `lock_requested` flag，后续接外部传感器。
@@ -142,6 +140,18 @@ LOCKED 触发通过 `lock_requested` flag，后续接外部传感器。
 | `set_damping(id, power)` | 阻尼模式，power 单位 mW |
 | `stop_on_control_mode(id, method, power)` | 释放(0x10)/锁力(0x11) |
 | `manager.servos[id].angle_monitor` | 读缓存角度 |
+
+## 遥测话题
+
+除舵机硬件状态外，节点还发布 3 个控制遥测话题（均在 HOLD 状态下更新，其他状态清零）：
+
+| 话题名 | 类型 | 数据 | 语义 |
+|--------|------|------|------|
+| `/servo_end_velocity` | `Float64MultiArray` | `[vx, vy, vz]` | 末端 3D 速度 (m/s)，由 J·ω 计算 |
+| `/servo_damping_mode` | `Float64MultiArray` | `[mode]` | 阻尼档位码：`0=非HOLD, 1=low, 2=mid, 3=high` |
+| `/servo_damping_powers` | `Float64MultiArray` | `[pw₀, pw₁, ...]` | 代码下发的目标阻尼功率 (mW)，按 servo_id 索引 |
+
+> `/servo_damping_powers` 是控制指令的记录，与硬件反馈的 `/servo_powers` 语义不同，可用于"目标 vs 实际"对比。
 
 ## 运行
 

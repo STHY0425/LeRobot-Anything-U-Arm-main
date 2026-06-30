@@ -304,6 +304,99 @@ class HxjDuojiNodeTest(unittest.TestCase):
         worker = node.Controller({}, shared_state, lock, stop_event, None)
         self.assertFalse(worker._start_done)
 
+    # ===== 遥测测试 =====
+
+    def test_shared_state_has_telemetry_fields(self):
+        """shared_state 初始包含 3 个遥测字段，默认值正确。"""
+        shared_state = node.ServoConfig.create_shared_state_from_values([0, 1, 2], 3)
+        self.assertEqual(shared_state["end_velocity"], [0.0, 0.0, 0.0])
+        self.assertEqual(shared_state["damping_mode"], 0)
+        self.assertEqual(shared_state["damping_powers"], {})
+
+    def test_copy_shared_state_includes_telemetry(self):
+        """copy_shared_state 后遥测字段存在且值一致。"""
+        lock = node.threading.Lock()
+        shared_state = node.ServoConfig.create_shared_state_from_values([0, 1], 2)
+        shared_state["end_velocity"] = [0.1, -0.2, 0.05]
+        shared_state["damping_mode"] = 2
+        shared_state["damping_powers"] = {0: 500, 1: 300}
+
+        copied = node.RosPublisher.copy_shared_state(shared_state, lock)
+        self.assertEqual(copied["end_velocity"], [0.1, -0.2, 0.05])
+        self.assertEqual(copied["damping_mode"], 2)
+        self.assertEqual(copied["damping_powers"], {0: 500, 1: 300})
+
+    def test_copy_shared_state_isolates_telemetry(self):
+        """copy 后修改副本不影响原 shared_state 的遥测字段。"""
+        lock = node.threading.Lock()
+        shared_state = node.ServoConfig.create_shared_state_from_values([0], 1)
+        shared_state["damping_powers"] = {0: 500}
+
+        copied = node.RosPublisher.copy_shared_state(shared_state, lock)
+        copied["damping_powers"][0] = 999
+        # 原始不受影响
+        self.assertEqual(shared_state["damping_powers"][0], 500)
+
+    def test_write_telemetry_writes_all_fields(self):
+        """_write_telemetry 一次写入 3 个字段。"""
+        lock = node.threading.Lock()
+        shared_state = node.ServoConfig.create_shared_state_from_values([0, 1, 2], 3)
+        worker = node.Controller({}, shared_state, lock, node.threading.Event(), None)
+
+        v_end = node.np.array([0.1, -0.2, 0.05])
+        worker._write_telemetry(v_end, 3, {0: 500, 1: 800, 2: 200})
+
+        self.assertEqual(shared_state["end_velocity"], [0.1, -0.2, 0.05])
+        self.assertEqual(shared_state["damping_mode"], 3)
+        self.assertEqual(shared_state["damping_powers"], {0: 500, 1: 800, 2: 200})
+
+    def test_clear_telemetry_zeros_all_fields(self):
+        """_clear_telemetry 清零 3 个字段。"""
+        lock = node.threading.Lock()
+        shared_state = node.ServoConfig.create_shared_state_from_values([0], 1)
+        shared_state["end_velocity"] = [0.1, 0.2, 0.3]
+        shared_state["damping_mode"] = 2
+        shared_state["damping_powers"] = {0: 500}
+
+        worker = node.Controller({}, shared_state, lock, node.threading.Event(), None)
+        worker._clear_telemetry()
+
+        self.assertEqual(shared_state["end_velocity"], [0.0, 0.0, 0.0])
+        self.assertEqual(shared_state["damping_mode"], 0)
+        self.assertEqual(shared_state["damping_powers"], {})
+
+    def test_telemetry_cleared_in_idle_state(self):
+        """IDLE 状态后遥测清零。"""
+        lock = node.threading.Lock()
+        shared_state = node.ServoConfig.create_shared_state_from_values([0], 1)
+        shared_state["control_state"] = node.STATE_IDLE
+        # 预置脏数据
+        shared_state["damping_mode"] = 2
+        shared_state["damping_powers"] = {0: 500}
+
+        worker = node.Controller({}, shared_state, lock, node.threading.Event(), None)
+        worker.run_state_machine_once(None)
+
+        self.assertEqual(shared_state["damping_mode"], 0)
+        self.assertEqual(shared_state["damping_powers"], {})
+
+    def test_telemetry_not_cleared_in_hold_state(self):
+        """HOLD 状态不清零遥测（由 apply_dynamic_damping 负责写入）。"""
+        lock = node.threading.Lock()
+        shared_state = node.ServoConfig.create_shared_state_from_values([0], 1)
+        shared_state["control_state"] = node.STATE_HOLD
+        shared_state["damping_mode"] = 2
+        shared_state["damping_powers"] = {0: 500}
+
+        # 用 mock manager，handle_hold → apply_dynamic_damping 会在 arm_params None 时直接返回
+        # 但 config 是空字典，get("arm_params") 返回 None → return，不写遥测也不清零
+        worker = node.Controller({}, shared_state, lock, node.threading.Event(), None)
+        worker.run_state_machine_once(None)
+
+        # HOLD 状态不清零，保持原值
+        self.assertEqual(shared_state["damping_mode"], 2)
+        self.assertEqual(shared_state["damping_powers"], {0: 500})
+
 
 if __name__ == "__main__":
     unittest.main()
