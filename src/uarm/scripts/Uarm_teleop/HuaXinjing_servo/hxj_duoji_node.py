@@ -25,7 +25,7 @@ import time
 import numpy as np
 import rospy # type: ignore
 import serial
-from std_msgs.msg import Float64MultiArray, Bool # type: ignore
+from std_msgs.msg import Float64MultiArray # type: ignore
 import fashionstar_uart_sdk as uservo # type: ignore
 
 
@@ -351,11 +351,6 @@ class ServoConfig:
             "control_state": STATE_START,
             "last_error": "",
             "last_update": 0.0,
-            # 零点角度数组，启动回零后全为 0.0（零点=0°）。
-            # RosPublisher 据此 latch 发布 /servo_zero_angles。
-            "zero_angles": [0.0] * int(num_servos),
-            # 零点是否已确认（回零完成后设 True），用于触发 latch 发布。
-            "zero_angles_confirmed": False,
         }
 
     # 根据当前配置创建线程共享状态。
@@ -412,8 +407,6 @@ class RosPublisher:
                 "control_state": shared_state["control_state"],
                 "last_error": shared_state["last_error"],
                 "last_update": shared_state["last_update"],
-                "zero_angles": list(shared_state.get("zero_angles", [])),
-                "zero_angles_confirmed": shared_state.get("zero_angles_confirmed", False),
             }
             for servo_id, servo_state in shared_state["servos"].items():
                 copied["servos"][servo_id] = dict(servo_state)
@@ -439,23 +432,11 @@ class RosPublisher:
     # ROS 发布线程的主循环。
     def run(self):
         publishers = self.create_publishers(self.rospy, self.config)
-        # /servo_zero_angles 用 latch 发布：只在新订阅者接入或零点刷新时发一次。
-        zero_angle_pub = self.rospy.Publisher("/servo_zero_angles", Float64MultiArray, queue_size=1, latch=True)
-        # 记录上次发布的零点数组，只有变化时才重新 latch。
-        last_zero_angles = None
         rate = self.rospy.Rate(self.config["rate"])
 
         while not self.stop_event.is_set() and not self.rospy.is_shutdown():
             state_copy = self.copy_shared_state(self.shared_state, self.state_lock)
             self.publish_state_arrays(publishers, state_copy)
-
-            # 零点确认后（或零点发生变化后）latch 发布 /servo_zero_angles。
-            zero_angles = state_copy.get("zero_angles", [])
-            zero_confirmed = state_copy.get("zero_angles_confirmed", False)
-            if zero_confirmed and zero_angles != last_zero_angles:
-                zero_angle_pub.publish(Float64MultiArray(data=list(zero_angles)))
-                last_zero_angles = list(zero_angles)
-
             rate.sleep()
 
 # 控制线程类：唯一访问串口和 UartServoManager 的地方。
@@ -485,10 +466,6 @@ class Controller:
         # START 状态是否已完成回零和交互。
         # 进入 START 后只执行一次回零+交互，之后等待用户选择目标状态。
         self._start_done = False
-
-        # 零点重置请求标志，由 /reset_servo_zero 话题回调设置。
-        # 下一周期在控制线程里执行回零（串口操作不能跨线程）。
-        self.reset_zero_requested = False
 
     # 安全读取对象属性，同时兼容对象和字典。
     @staticmethod
@@ -612,11 +589,27 @@ class Controller:
         if self._start_done:
             return
 
-        # 1. 同步回零 + 确认零点（复用 _drive_to_zero / _confirm_zero_angles）。
+        servo_ids = self.config["servo_ids"]
+
+        # 1. 同步回零：逐个下发 0° 目标，interval=2000ms 给足转向时间。
         if self.rospy is not None:
-            self.rospy.loginfo("STATE_START: 开始同步回零（%d 个舵机 → 0°）", len(self.config["servo_ids"]))
-        self._drive_to_zero(manager)
-        self._confirm_zero_angles()
+            self.rospy.loginfo("STATE_START: 开始同步回零（%d 个舵机 → 0°）", len(servo_ids))
+        for servo_id in servo_ids:
+            try:
+                manager.set_servo_angle(int(servo_id), 0.0, interval=2000)
+            except Exception as exc:
+                if self.rospy is not None:
+                    self.rospy.logerr("舵机 %d 回零失败: %s", servo_id, exc)
+
+        # 2. 阻塞等待所有舵机到位。
+        try:
+            manager.wait(timeout=5000)
+        except Exception as exc:
+            if self.rospy is not None:
+                self.rospy.logwarn("wait() 等待回零超时或异常: %s", exc)
+
+        if self.rospy is not None:
+            self.rospy.loginfo("STATE_START: 回零完成，等待用户选择目标状态")
 
         # 3. 终端交互：用户选择下一个状态。
         next_state = self._prompt_for_target_state()
@@ -655,54 +648,6 @@ class Controller:
             if choice in choices:
                 return choices[choice][0]
             print("无效选项 '%s'，请重新输入" % choice)
-
-    # 驱动所有舵机到 0°，阻塞等待到位。
-    # handle_start 和 /reset_servo_zero 都复用这个方法。
-    def _drive_to_zero(self, manager):
-        servo_ids = self.config["servo_ids"]
-        if self.rospy is not None:
-            self.rospy.loginfo("开始同步回零（%d 个舵机 → 0°）", len(servo_ids))
-        for servo_id in servo_ids:
-            try:
-                manager.set_servo_angle(int(servo_id), 0.0, interval=2000)
-            except Exception as exc:
-                if self.rospy is not None:
-                    self.rospy.logerr("舵机 %d 回零失败: %s", servo_id, exc)
-        try:
-            manager.wait(timeout=5000)
-        except Exception as exc:
-            if self.rospy is not None:
-                self.rospy.logwarn("wait() 等待回零超时或异常: %s", exc)
-        if self.rospy is not None:
-            self.rospy.loginfo("回零完成")
-
-    # 标记零点已确认：填入 zero_angles（全 0，因为零点=0°），
-    # 设 zero_angles_confirmed=True 触发 RosPublisher latch 发布 /servo_zero_angles。
-    def _confirm_zero_angles(self):
-        num_servos = self.config["num_servos"]
-        zero_angles = [0.0] * num_servos
-        self.state_lock.acquire()
-        try:
-            self.shared_state["zero_angles"] = zero_angles
-            # 先设 False 再设 True，确保 RosPublisher 检测到变化。
-            self.shared_state["zero_angles_confirmed"] = False
-        finally:
-            self.state_lock.release()
-        self.state_lock.acquire()
-        try:
-            self.shared_state["zero_angles_confirmed"] = True
-        finally:
-            self.state_lock.release()
-        if self.rospy is not None:
-            self.rospy.loginfo("零点已确认: %s", zero_angles)
-
-    # /reset_servo_zero 话题回调：设置 flag，下一周期在控制线程里执行回零。
-    # 不能在这里直接操作串口，因为 manager 在 Controller 线程独占。
-    def reset_zero_callback(self, msg):
-        if msg.data:
-            if self.rospy is not None:
-                self.rospy.loginfo("收到零点重置请求")
-            self.reset_zero_requested = True
 
     # 空闲状态处理：当前不下发舵机命令。
     def handle_idle(self, manager):
@@ -745,13 +690,6 @@ class Controller:
             current_state = self.shared_state["control_state"]
         finally:
             self.state_lock.release()
-
-        # 检查零点重置请求（由 /reset_servo_zero 话题回调触发）。
-        if self.reset_zero_requested:
-            self._drive_to_zero(manager)
-            self._confirm_zero_angles()
-            self.reset_zero_requested = False
-            return
 
         # 检查 lock/unlock 请求（本期 flag 默认 False，后续接外部传感器）。
         if self.lock_requested and current_state == STATE_HOLD:
@@ -1069,10 +1007,6 @@ class Controller:
                 self.rospy.logerr("舵机串口打开失败: %s", exc)
                 return
             self.rospy.loginfo("舵机串口已打开: %s @ %d", self.config["port"], self.config["baudrate"])
-
-            # 注册 /reset_servo_zero 订阅：收到 True 时在下一控制周期重新回零。
-            self.rospy.Subscriber("/reset_servo_zero", Bool, self.reset_zero_callback)
-            self.rospy.loginfo("已订阅 /reset_servo_zero")
 
             # 启动时默认进入 START 状态：同步回零 + 终端交互。
             # 用户在终端选择目标状态（HOLD / LOCKED / IDLE）后自动切换。

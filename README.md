@@ -1,154 +1,223 @@
-# LeRobot-Anything-U-Arm — 华馨京舵机 3D 动态阻尼控制节点
+# 🤖 Lerobot Anything
 
-## 概述
+[![en](https://img.shields.io/badge/lang-en-blue.svg)](README.md)
+[![ROS Noetic](https://img.shields.io/badge/ROS-Noetic-brightgreen.svg)](https://www.ros.org/)
+[![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/)
+[![Ubuntu](https://img.shields.io/badge/Ubuntu-20.04-orange.svg)](https://ubuntu.com/)
+[![Arxiv](https://img.shields.io/badge/arXiv-2509.02437-b31b1b.svg
+)](https://arxiv.org/abs/2509.02437)
+[![Apache License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-基于 ROS1 的机械臂舵机阻尼控制节点，核心功能是**非对称三档动态阻尼**：
+<p align="center">
+  <img src="pics/Xarm.gif" width="30%" alt="xArm Demo" />
+  <img src="pics/Dobot.gif" width="30%" alt="Dobot Demo" />
+  <img src="pics/Arx.gif" width="30%" alt="ARX Demo" />
+</p>
 
-- 通过 3D DH 运动学实时计算末端位置和速度
-- 根据末端竖直速度 vz 判断顺逆重力方向
-- 切向关节按雅可比列范数权重分发三档固定阻尼预算
-- 轴向关节固定基础阻尼，不参与分发
-- 支持 3-7 轴任意 axial/tangential 构型，JSON 驱动，不硬编码
+---
 
-## 文件结构
+> **🚀 Bringing Leader-Follower teleoperation system to every real robot and robot arm -- Cheaper, Smoother, Plug-and-Play**
+> **💵 Starts from $60 cost!! Then controls any robot arm system!!**
 
-```
-LeRobot-Anything-U-Arm-main/
-├── hxj_duoji_node.py          # 唯一核心源文件
-├── config/
-│   └── example.json           # 机械臂参数配置
-├── tests/
-│   └── test_hxj_duoji_node.py # 单元测试（28 个）
-├── fashionstar_servo_python_sdk_api.md  # 舵机官方 SDK 文档
-├── ONBOARDING.md              # 新 agent 上手指南
-└── README.md                  # 本文件
-```
+*Built upon the giants: [LeRobot](https://github.com/huggingface/lerobot), [SO-100/SO-101](https://github.com/TheRobotStudio/SO-ARM100), [XLeRobot](https://github.com/Vector-Wangel/XLeRobot#), [Gello](https://github.com/wuphilipp/gello_mechanical/tree/main)*
 
-## 架构
+# 📰 News
+- 2025-11-10: **Global version** based on Feetech STS3215 servo is launched! Check [here](https://docs.google.com/document/d/1dUN4sJhYx_iuS_rFvj-YpyX4Y7nneRDTKJxCQ7PTXpY/edit?usp=sharing).
+- 2025-11-1: We add support for SO-100 and XLeRobot Teleoperation! Check [here](github.com/MINT-SJTU/LeRobot-Anything-U-Arm/tree/main/src/uarm/scripts/Follower_Arm/LeRobot).
+- 2025-09-10: STEP files of 3 configs are uploaded.
+- 2025-09-08: Hardware Assembly Video Uploaded! We also open-sourced 5 datasets collected by UArm with XArm6 at [our huggingface page](https://huggingface.co/MINT-SJTU)
+- 2025-08-15: **LeRobot Anything UArm 0.1.0** hardware setup, the 1st version fully capable for three major robot arm configurations, starts from 60$.
 
-单文件三职责：
+---
 
-| 类 | 职责 |
-|---|------|
-| `ServoConfig` | 读 JSON 机械臂参数 + 串口配置，创建共享状态 |
-| `RosPublisher` | ROS 发布线程，只读共享状态发话题，不碰串口 |
-| `Controller` | 控制线程，唯一访问串口，3D 运动学 + 三档动态阻尼 |
+# 📋 Table of Contents
 
-线程模型：
-```
-main 主线程（空转等退出）
-├── ros_thread — 50Hz 读共享状态 → 发 ROS 话题
-└── control_thread — 50Hz 读舵机 → 3D FK → Jacobian → 三档阻尼 → 下发
-```
+- [Overview](#-overview)
+- [✨ Features](#-features)
+- [💵 Total Cost](#-total-cost-)
+- [🤖 Supported Robots (find your robot in the list!)](#-supported-robots)
+- [🚀 Quick Start](#-quick-start)
+- [🔮 Roadmap](#-roadmap)
+- [🤝 Contributing](#-contributing)
+- [🔧 Tired of DIY? Order Now](#-Order-Link)
+---
 
-## 核心算法
+## 🎯 Overview
 
-### 3D DH 运动学
+LeRobot Anything is a **low-cost, universal, leader-follower teleoperation system** for any commercial robot arms through 3 hardware configurations. Designed for researchers, educators, and robotics enthusiasts, it provides a standardized interface for diverse robot platforms. This project focus on extending the Lerobot to control any real robot in both real scene and simulation. 
 
-```
-所有关节角度 → 3D DH 表（含 α 扭转角）
-            → 正运动学 → 末端 (px, py, pz)
-            → 3D 雅可比 J (3×N_total)
-            → 角度差分 → 关节角速度 ω
-            → 末端速度 v = J·ω → (vx, vy, vz)
-```
+For detail, see our technical report [here](https://arxiv.org/abs/2509.02437).
 
-- 轴向关节 α=π/2（平面偏转），切向 α=0（同平面）
-- 所有关节参与运动学，确保底座旋转后末端位置准确
+### 🎯 Target Environment (Docker coming soon)
 
-### 三档动态阻尼
+- **OS**: Ubuntu 20.04
+- **ROS**: Noetic
+- **Simulation**: SAPIEN integration (Built upon [ManiSkill](https://github.com/haosulab/ManiSkill))
 
-| 档位 | 触发条件 | 预算 | 手感 |
-|------|---------|------|------|
-| 低档 | vz > threshold（逆重力/上抬） | 600 mW | 轻盈 |
-| 中档 | \|vz\| ≤ threshold（水平/静止） | 1000 mW | 正常 |
-| 高档 | vz < -threshold（顺重力/下坠） | 1500 mW | 托住 |
+---
 
-切向关节按 3D 雅可比列范数权重分发所选预算，受单舵机 1000mW 硬上限截断。
+## ✨ Features
 
-轴向关节固定 `base_damping_power=500mW`，不参与三档。
+| Feature                             | Description                                                                   |
+| ----------------------------------- | ----------------------------------------------------------------------------- |
+| 🔄**Universal Compatibility** | Four teleop configurations covering **most (95%) commercial robot arms** |
+| 📡**ROS Integration**         | Native ROS1 support with `/servo_angles` topic publishing                   |
+| 🎮**Real-time Control**       | Low-latency joint-space control                                        |
+| 🔌**Plug & Play**             | Easy follower-arm integration with provided examples                          |
+| 🛠️**Extensible**            | Simple API for adding new robot support                                       |
+| 💰**Cost-effective**          | Ultra low-cost hardware solution                                              |
+| 🎯**Optimized Hardware**      | Move smoothly and flexibly                                                    |
+| 💻**Simulation Test**         | Support teleoperation test in simulation environment                                  |
 
-### 阻尼分发保证
+### 🎮 Ready-to-Use Examples
 
-```
-J_3d (3×N_total) → extract_tangential_jacobian → J_tan (3×N_tan)
-                                               → distribute_damping_3d → 只分给切向
-```
+**Real Robot Examples:**
 
-轴向列在运动学里"通过"了，在分发时被"过滤"掉了。
+<p align="center">
 
-## 配置
+| Dobot CR5 | xArm Series | ARX5 |
+|-----------|-------------|------|
+| <img src="pics/Dobot.gif" width="200" alt="Dobot CR5 Real Robot" /> | <img src="pics/Xarm.gif" width="200" alt="xArm Series Real Robot" /> | <img src="pics/Arx.gif" width="200" alt="ARX5 Real Robot" /> |
 
-### JSON (`config/example.json`)
+</p>
 
-```json
-{
-    "dof": 3,
-    "joints": {
-        "joint1": {
-            "type": "axial",
-            "link": { "length": 0.18, "twist": 1.5708, "offset": 0.0 }
-        },
-        "joint2": {
-            "type": "tangential",
-            "link": { "length": 0.15, "twist": 0.0, "offset": 0.0 }
-        }
-    }
-}
-```
+**Simulation Examples:**
 
-- `type`: axial / tangential，决定阻尼处理方式
-- `twist`: DH α 角（弧度），缺省时 axial→π/2，tangential→0
-- `offset`: DH d 偏移，缺省 0
-- `dof` 决定 servo_ids，不硬编码
+<p align="center">
 
-### DEFAULTS 字典
+| SO100 | ARX-X5 | XLeRobot |
+|-------|--------|----------|
+| <img src="pics/so100-sim.gif" width="200" alt="SO100 Simulation" /> | <img src="pics/arx-x5-sim.gif" width="200" alt="ARX-X5 Simulation" /> | <img src="pics/x_fetch-sim.gif" width="200" alt="XLeRobot Simulation" /> |
 
-所有阻尼参数默认值集中在 `hxj_duoji_node.py` 顶部的 `DEFAULTS` 字典：
+| xArm Series | Franka Panda | Piper |
+|-------------|--------------|-------------|
+| <img src="pics/xarm6_robotiq-sim.gif" width="200" alt="xArm Series Simulation" /> | <img src="pics/panda-sim.gif" width="200" alt="Franka Panda Simulation" /> | <img src="pics/piper-sim.gif" width="200" alt="Piper Simulation" /> |
 
-```python
-DEFAULTS = {
-    "end_damping": 1000,
-    "end_damping_low": 600,      # 低档
-    "end_damping_mid": 1000,     # 中档
-    "end_damping_high": 1500,    # 高档
-    "base_damping_power": 500,   # 轴向固定
-    "max_damping_power": 1000,   # 单舵机上限
-    "vz_threshold": 0.01,        # 顺逆重力阈值 (m/s)
-}
-```
+</p> 
 
-调试时只改这里，全局生效。
+## 💵 Total Cost 💵
 
-## 状态机
+> [!NOTE]
+> Cost excludes 3D printing, tools, shipping, and taxes.
 
-| 状态 | 用途 |
-|------|------|
-| IDLE | 空闲，不下发命令 |
-| HOLD | 阻尼控制（核心），3D 三档动态阻尼 |
-| LOCKED | 锁死，所有舵机保持锁力（`stop_on_control_mode(method=0x11)`） |
-| MOVE | 预留 |
-| PLAN | 预留 |
-| ERROR | 停机释放 |
+| Price                             | US             | EU              | CN               |
+| --------------------------------- | -------------- | --------------- | ---------------- |
+| **Basic** (use your laptop) | **~$60** | **~€60** | **~¥360** |
+| ↑ Servos                         | +$60           | +€60           | +¥405           |
 
-LOCKED 触发通过 `lock_requested` flag，后续接外部传感器。
+---
 
-## SDK API
+## 🤖 Supported Robots (find your robot in the list!)
 
-| API | 用途 |
-|-----|------|
-| `UartServoManager(uart)` | 创建管理器 |
-| `send_sync_servo_monitor(ids)` | 同步读取所有舵机状态 |
-| `set_damping(id, power)` | 阻尼模式，power 单位 mW |
-| `stop_on_control_mode(id, method, power)` | 释放(0x10)/锁力(0x11) |
-| `manager.servos[id].angle_monitor` | 读缓存角度 |
+| Configuration                                                                                                         | Compatible Robot Arms                                                                      | Status   |
+| --------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ | -------- |
+| [**Config 1**](https://github.com/MINT-SJTU/LeRobot-Anything-U-Arm/tree/main/mechanical/Config1_STL) | Xarm6, Fanuc LR Mate 200iD, Trossen ALOHA, Agile PiPER, Realman RM65B, KUKA LBR iiSY Cobot | ✅ Ready |
+| [**Config 2**](https://github.com/MINT-SJTU/LeRobot-Anything-U-Arm/tree/main/mechanical/Config2_STL) | Dobot CR5, UR5, ARX R5*, AUBO i5, JAKA Zu7                                                 | ✅ Ready |
+| [**Config 3**](https://github.com/MINT-SJTU/LeRobot-Anything-U-Arm/tree/main/mechanical/Config3_STL) | Franka FR3, Franka Emika Panda, Flexiv Rizon, Realman RM75B , Xarm7                               | ✅ Ready |
 
-## 运行
+> 💡 **This is only part of our supported robots! For more robots, you can compare their mechanical configuration with each U-Arm to confirm which one fits your need (in most cases it will).
 
-```bash
-# 测试
-docker exec ros1-noetic bash -lc 'source /opt/ros/noetic/setup.bash && cd /root/ros1_ws/LRrobot/src/LeRobot-Anything-U-Arm-main && PYTHONPATH=.:$PYTHONPATH python3 -m unittest tests.test_hxj_duoji_node -v'
+---
 
-# 运行节点（需要 ROS master + 串口）
-rosrun hxj_duoji_node hxj_duoji_node.py
-```
+## 🚀 Quick Start
+
+> [!NOTE]
+> If you are totally new to programming, please spend at least a day to get yourself familiar with basic Python, Ubuntu and GitHub (with the help of Google and AI). At least you should know how to set up Ubuntu system, git clone, pip install, use interpreters (VS Code, Cursor, PyCharm, etc.) and directly run commands in the terminals.
+
+1. 💵 **Buy your parts**: [Bill of Materials](https://docs.google.com/document/d/1TjhJOeJXsD5kmoYF-kuWfPju6WSUeSnivJiU7TH4vWs/edit?tab=t.0#heading=h.k991lzlarfb8)
+2. 🖨️ **Print your stuff**: [3D printing](https://github.com/MINT-SJTU/Lerobot-Anything-U-arm/tree/main/mechanical)
+3. 🔨 **Assemble**! [Assembly Guide](https://www.youtube.com/watch?v=-gpYuN2LlVs)
+4. 💻 **Software Env Set up & Real-world Teleop**: [Get your robot moving!](https://github.com/MINT-SJTU/Lerobot-Anything-Uarm/blob/main/howtoplay.md)
+5. 🎮 **Simulation**: [Try it out in SAPIEN!](https://github.com/MINT-SJTU/Lerobot-Anything-U-arm/blob/main/src/simulation/README.md)
+
+For detailed hardware guide, check  [Hardware Guide](https://docs.google.com/document/d/1TjhJOeJXsD5kmoYF-kuWfPju6WSUeSnivJiU7TH4vWs/edit?tab=t.0#heading=h.k991lzlarfb8)
+
+
+
+---
+
+## 🔮 Roadmap
+
+### 🎯 TO-DO List
+
+- [X] **SAPIEN Simulation Environment**: Install and Play!
+
+  - Virtual teleop setup mirroring physical hardware
+  - Rapid prototyping and testing capabilities
+  - Integration with existing SAPIEN workflows
+- [ ] **ROS2 Support**
+- [ ] **Docker Image**
+- [ ] **Humanoid System: Config4**
+
+---
+
+## 🤝 Contributing
+
+We welcome contributions! Here's how you can help:
+
+### 💡 Feature Requests
+
+### 🔧 Code Contributions
+
+### 🤖 Adding New Robot Support
+
+---
+
+## ❓ FAQ
+
+### 1. Is this project compatible with my XXX robot arm?
+**A:** Please first refer to the **Supported Robots** section above, where part of compatible arms are listed along with corresponding config.  Note that this project aims to provide a **universal teleoperation framework** and example control code. Here, “compatibility” means that the operator can intuitively control the corresponding follower arm on hardware side by using UArm.  
+This is independent of different brands’ software APIs — it only depends on the **joint topology** of the robot.  To find your robot’s joint topology, check [Hardware Guide](https://docs.google.com/document/d/1TjhJOeJXsD5kmoYF-kuWfPju6WSUeSnivJiU7TH4vWs/edit?tab=t.0#heading=h.k991lzlarfb8).
+
+
+---
+
+### 2. How can I develop based on my own follower arm?
+**A:** Start by reading [`LeRobot-Anything-U-Arm/src/uarm/scripts/Uarm_teleop/servo_reader`](https://github.com/MINT-SJTU/LeRobot-Anything-U-Arm/blob/main/src/uarm/scripts/Uarm_teleop/servo_reader.py).  
+This script reads all UArm joint angles and is wrapped as a ROS node.  
+You need to write a **subscriber** based on your follower arm’s API that receives joint commands from the `'/servo_angles'` topic and sends them to your arm.  [`Dobot Controller`](https://github.com/MINT-SJTU/LeRobot-Anything-U-Arm/blob/main/src/uarm/scripts/Follower_Arm/Dobot/servo2Dobot.py) is a simple example.
+
+If you prefer not to use ROS communication, you can directly read the UArm’s servo command data and send them to your follower arm.  
+See this [`ARX example`](https://github.com/MINT-SJTU/LeRobot-Anything-U-Arm/blob/main/src/uarm/scripts/Follower_Arm/ARX/arx_teleop.py) for reference.
+
+
+## 🔧 Order Link
+If you are tired of DIY, buy it on [JD 京东链接](https://item.jd.com/10170154240149.html) or contact business@evomind-tech.com for purchase.
+Please note your Robotic Arm brand and model. 下单/咨询请注明使用的机械臂具体品牌型号。如有技术问题需要解答，请通过下方二维码进入社区群里咨询，京东上不便于回答讨论详细技术问题。
+
+
+## 👥 Contributors
+
+- **Yanwen Zou** - Hardware&Software System Design
+- **Yanhan Sun** - Feetech Version Design
+- **Zhaoye Zhou** - Hareware Assemble and Adjustment
+- **Chenyang Shi** - SAPIEN and website setup
+- **Zewei Ye** - LeRobot adaptation and real-world Experiment
+- **Jiaqi Lu** - Real-world Experiment
+- **Jie Yi** - Real-world Experiment
+- **Nuobei Zhu** - Hardware and Production Optimization 
+- **Siyuan Wang, Lixing Zou** - Hardware Assemble
+- **Junda Huang** - Idea Discussion and website setup
+- **Gaotian Wang** - Idea Discussion
+
+This project builds upon the excellent work of:
+
+- [LeRobot](https://github.com/huggingface/lerobot) - The foundation for robot learning
+- [SO-100/SO-101](https://github.com/TheRobotStudio/SO-ARM100) - Hardware inspiration
+- [XLeRobot](https://github.com/Vector-Wangel/XLeRobot) - Extended robot support
+- [Gello](https://github.com/wuphilipp/gello_mechanical/tree/main) - Hardware inspiration
+
+Thanks to all the talented contributors behind these detailed and professional projects! You are also welcomed to join our WeChat Community for discussion and questions:
+<div align="center">
+<img src="pics/uarm_community.jpg" width="200" />
+</div>
+---
+
+<div align="center">
+
+**Made with ❤️ for the robotics community**
+
+[![GitHub stars](https://img.shields.io/github/stars/MINT-SJTU/Lerobot-Anything-U-arm?style=social)](https://github.com/MINT-SJTU/LeRobot-Anything-U-Arm)
+[![GitHub forks](https://img.shields.io/github/forks/MINT-SJTU/Lerobot-Anything-U-arm?style=social)](https://github.com/MINT-SJTU/LeRobot-Anything-U-Arm)
+
+</div>
