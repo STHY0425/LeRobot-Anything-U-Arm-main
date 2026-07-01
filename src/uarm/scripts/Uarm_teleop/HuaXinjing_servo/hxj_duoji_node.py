@@ -502,13 +502,15 @@ class Controller:
         self._start_done = False
 
     # 安全读取对象属性，同时兼容对象和字典。
+    # None 当作缺失处理：getattr 在属性存在但值为 None 时返回 None 而非 default，
+    # dict.get 同理，所以取到 None 后手动替换为 default_value。
     @staticmethod
     def get_attr(obj, name, default_value):
-        # 官方 SDK 返回的数据有可能是对象，也有可能是字典。
-        # 字典读取用 obj.get("字段名")，对象读取用 getattr(obj, "属性名")。
         if isinstance(obj, dict):
-            return obj.get(name, default_value)
-        return getattr(obj, name, default_value)
+            value = obj.get(name, default_value)
+        else:
+            value = getattr(obj, name, default_value)
+        return default_value if value is None else value
 
     # 把官方同步监控数据转换成普通字典，供共享状态和状态机使用。
     @staticmethod
@@ -635,12 +637,10 @@ class Controller:
                 if self.rospy is not None:
                     self.rospy.logerr("舵机 %d 回零失败: %s", servo_id, exc)
 
-        # 2. 阻塞等待所有舵机到位。
-        try:
-            manager.wait(timeout=5000)
-        except Exception as exc:
-            if self.rospy is not None:
-                self.rospy.logwarn("wait() 等待回零超时或异常: %s", exc)
+        # 2. 等待舵机转到目标位置（SDK 没有 wait()，用 sleep 替代）。
+        if self.rospy is not None:
+            self.rospy.loginfo("STATE_START: 等待舵机到位（2.5s）")
+        time.sleep(2.5)
 
         if self.rospy is not None:
             self.rospy.loginfo("STATE_START: 回零完成，等待用户选择目标状态")
