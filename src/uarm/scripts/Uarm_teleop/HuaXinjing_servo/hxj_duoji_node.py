@@ -28,6 +28,8 @@ import serial
 from std_msgs.msg import Float64MultiArray # type: ignore
 import fashionstar_uart_sdk as uservo # type: ignore
 
+from key_hold_thread import KeyHoldThread
+
 
 # 控制状态机的状态名。
 STATE_START = "START"      # 启动：同步回零 + 终端交互，等待用户选择目标状态
@@ -1150,6 +1152,17 @@ def main():
     ros_thread = start_thread("ros_thread", ros_publisher.run, ())
     # 启动控制线程。
     control_thread = start_thread("control_thread", controller.run, ())
+
+    # 启动按键锁定/解锁线程（按住 'k' 解锁 HOLD，松开锁定 LOCKED）。
+    # 运行前需在终端执行 xset r rate 250 40。
+    key_thread = KeyHoldThread(
+        controller=controller,
+        shared_state=shared_state,
+        state_lock=state_lock,
+        stop_event=stop_event,
+        rospy=rospy,
+    )
+    start_thread("key_hold_thread", key_thread.run, ())
 
     try:
         # main 主线程不做具体控制，只负责活着等待。
