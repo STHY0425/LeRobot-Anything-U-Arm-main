@@ -4,7 +4,7 @@
         "length": "m",
         "mass": "kg"
     },
-    "dof": 3,
+    "dof": 2,
     "joints": {
         "joint1": {
             "type": "axial",
@@ -27,17 +27,7 @@
                 "offset": 0.0
             },
             "actuator_mass": 0.045
-        },
-        "joint3": {
-            "type": "tangential",
-            "link": {
-                "length": 0.10,
-                "mass": 0.08,
-                "center_of_mass": [0.05, 0.0, 0.0],
-                "twist": 0.0,
-                "offset": 0.0
-            },
-            "actuator_mass": 0.035
         }
+
     }
 }
