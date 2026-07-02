@@ -9,25 +9,26 @@
         "joint1": {
             "type": "axial",
             "link": {
-                "length": 0.18,
+                "l": 0.0,
+                "d": 0.08,
+                "alpha": 1.5708,
+                "theta": 0.0,
                 "mass": 0.16,
-                "center_of_mass": [0.09, 0.0, 0.0],
-                "twist": 1.5708,
-                "offset": 0.0
+                "center_of_mass": [0.0,0.0,0.04]
             },
             "actuator_mass": 0.055
         },
         "joint2": {
             "type": "tangential",
             "link": {
-                "length": 0.15,
+                "l": 0.15,
+                "d": 0.0,
+                "alpha": 0.0,
+                "theta": 1.5708,
                 "mass": 0.12,
-                "center_of_mass": [0.075, 0.0, 0.0],
-                "twist": 0.0,
-                "offset": 0.0
+                "center_of_mass": [0.075,0.0,0.0]
             },
             "actuator_mass": 0.045
         }
-
     }
 }

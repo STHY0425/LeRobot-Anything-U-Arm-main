@@ -48,6 +48,8 @@ DEFAULTS = {
     "end_damping_high": 1500,  # 高档：顺重力（下坠）时用，值大，托住机械臂。
     # 轴向关节固定阻尼功率（mW），不参与末端阻尼分发。
     "base_damping_power": 500,
+    # 锁死状态保持功率。
+    "lock_power": 6000,
     # 单个舵机阻尼功率的硬上限（mW），舵机硬件限制。
     "max_damping_power": 1000,
     # 顺逆重力判定阈值（m/s），末端竖直速度超过此值才切换档位。
@@ -64,7 +66,8 @@ class Arm:
     # joints_twist 是 DH 参数 α（扭转角，弧度），控制旋转轴方向变化：
     #   切向 α=0（同平面），轴向 α=π/2（平面翻转 90°）。
     # joints_offset 是 DH 参数 d（z 轴偏移），通常为 0。
-    def __init__(self, arm_name="", dof=0, joints_length=None,joints_mass=None,actuator_mass=None, joint_types=None, joints_twist=None, joints_offset=None):
+    # joints_theta 是 DH 参数 θ 的固定偏置（弧度），会与舵机角度相加。
+    def __init__(self, arm_name="", dof=0, joints_length=None,joints_mass=None,actuator_mass=None, joint_types=None, joints_twist=None, joints_offset=None, joints_theta=None):
         self.arm_name = arm_name
         self.dof = int(dof)
         if joints_length is None:
@@ -91,6 +94,10 @@ class Arm:
         if joints_offset is None:
             joints_offset = []
         self.joints_offset = joints_offset
+        # DH 参数 θ 固定偏置（弧度），用于对齐舵机零位和 DH 零位。
+        if joints_theta is None:
+            joints_theta = []
+        self.joints_theta = joints_theta
 
 class ServoConfig:
     # 初始化配置读取类。
@@ -111,6 +118,7 @@ class ServoConfig:
         end_damping_mid=DEFAULTS["end_damping_mid"],
         end_damping_high=DEFAULTS["end_damping_high"],
         base_damping_power=DEFAULTS["base_damping_power"],
+        lock_power=DEFAULTS["lock_power"],
         max_damping_power=DEFAULTS["max_damping_power"],
         vz_threshold=DEFAULTS["vz_threshold"],
     ):
@@ -137,6 +145,8 @@ class ServoConfig:
         self.end_damping_high = int(end_damping_high)
         # 轴向关节固定阻尼功率（mW），不参与末端阻尼分发。
         self.base_damping_power = int(base_damping_power)
+        # 锁死状态保持功率。
+        self.lock_power = int(lock_power)
         # 阻尼功率安全上限（mW），所有关节的阻尼功率都会被限制在此范围内。
         self.max_damping_power = int(max_damping_power)
         # 顺逆重力判定阈值（m/s）。
@@ -190,32 +200,34 @@ class ServoConfig:
         # 关节类型列表，从 JSON 的 "type" 字段读取。
         # 如果某个 joint 没有写 type 字段，默认当作 "tangential"（切向）处理。
         joint_types = []
-        # DH 参数 α（扭转角，弧度）和 d（z 轴偏移）。
-        # 3D 运动学需要这两个参数来跟踪轴向旋转导致的平面偏转。
+        # Standard DH 参数：l(a)、d、alpha、theta。
+        # length/twist/offset 是旧字段名，仅作为兼容 fallback。
         joints_twist = []
         joints_offset = []
+        joints_theta = []
         for joint_index in range(dof):
             joint_name = "joint%d" % (joint_index + 1)
             joint_data = ServoConfig.require_key(joints_data, joint_name, "joints")
             link_data = ServoConfig.require_key(joint_data, "link", joint_name)
 
-            joints_length.append(float(ServoConfig.require_key(link_data, "length", joint_name + ".link")))
+            joints_length.append(float(link_data.get("l", link_data.get("length", 0.0))))
             joints_mass.append(float(link_data.get("mass", 0.0)))
             actuator_mass.append(float(joint_data.get("actuator_mass", 0.0)))
             # 读取关节类型，缺省时默认 "tangential"。
             jtype = str(joint_data.get("type", "tangential"))
             joint_types.append(jtype)
 
-            # 读取 α 扭转角：优先读 JSON 的 twist 字段，缺省时按关节类型自动填充。
-            # 切向 α=0（同平面），轴向 α=π/2（旋转轴翻转 90°，平面偏转）。
-            twist = link_data.get("twist", None)
-            if twist is None:
-                twist = math.pi / 2 if jtype == "axial" else 0.0
-            joints_twist.append(float(twist))
+            # 读取 standard DH 的 alpha/d/theta；兼容旧字段 twist/offset。
+            alpha = link_data.get("alpha", link_data.get("twist", None))
+            if alpha is None:
+                alpha = math.pi / 2 if jtype == "axial" else 0.0
+            joints_twist.append(float(alpha))
 
-            # 读取 d 偏移：优先读 JSON 的 offset 字段，缺省 0。
-            offset = link_data.get("offset", 0.0)
-            joints_offset.append(float(offset))
+            d = link_data.get("d", link_data.get("offset", 0.0))
+            joints_offset.append(float(d))
+
+            theta = link_data.get("theta", 0.0)
+            joints_theta.append(float(theta))
 
         return Arm(
             arm_name=arm_name,
@@ -226,6 +238,7 @@ class ServoConfig:
             joint_types=joint_types,
             joints_twist=joints_twist,
             joints_offset=joints_offset,
+            joints_theta=joints_theta,
         )
 
     # 读取 JSON 必填字段，缺字段时直接报错中断。
@@ -310,6 +323,8 @@ class ServoConfig:
             "end_damping_high": self.end_damping_high,
             # 轴向关节固定阻尼功率（mW）。
             "base_damping_power": self.base_damping_power,
+            # 锁死状态保持功率。
+            "lock_power": self.lock_power,
             # 阻尼功率安全上限（mW）。
             "max_damping_power": self.max_damping_power,
             # 顺逆重力判定阈值（m/s）。
@@ -343,6 +358,7 @@ class ServoConfig:
             "last_update": 0.0,
             # 遥测字段：由 Controller 写入，RosPublisher 读取发布。
             "end_velocity": [0.0, 0.0, 0.0],  # [vx, vy, vz] m/s
+            "end_position": [0.0, 0.0, 0.0],  # [x, y, z] m
             "damping_mode": 0,                 # 0=非HOLD, 1=low, 2=mid, 3=high
             "damping_powers": {},              # {servo_id: power_mW}
         }
@@ -367,6 +383,7 @@ class RosPublisher:
     # 遥测话题：数据不在 servos 子表里，独立发布。
     TELEMETRY_TOPICS = (
         ("end_velocity", "/servo_end_velocity"),    # [vx, vy, vz] m/s
+        ("end_position", "/servo_end_position"),    # [x, y, z] m
         ("damping_mode", "/servo_damping_mode"),    # [mode] 0/1/2/3
         ("damping_powers", "/servo_damping_powers"), # [pw0, pw1, ...] mW
     )
@@ -410,6 +427,7 @@ class RosPublisher:
                 "last_update": shared_state["last_update"],
                 # 遥测字段一并拷贝，避免 ROS 线程读到脏数据。
                 "end_velocity": list(shared_state.get("end_velocity", [0.0, 0.0, 0.0])),
+                "end_position": list(shared_state.get("end_position", [0.0, 0.0, 0.0])),
                 "damping_mode": shared_state.get("damping_mode", 0),
                 "damping_powers": dict(shared_state.get("damping_powers", {})),
             }
@@ -448,6 +466,10 @@ class RosPublisher:
         # 末端速度 [vx, vy, vz]
         telemetry_pubs["end_velocity"].publish(
             Float64MultiArray(data=list(shared_state.get("end_velocity", [0.0, 0.0, 0.0])))
+        )
+        # 末端位置 [x, y, z]
+        telemetry_pubs["end_position"].publish(
+            Float64MultiArray(data=list(shared_state.get("end_position", [0.0, 0.0, 0.0])))
         )
         # 阻尼档位 [mode]
         telemetry_pubs["damping_mode"].publish(
@@ -492,6 +514,12 @@ class Controller:
         self.prev_angles = None
         # 上一周期的时间戳，用于计算实际 dt。
         self.prev_timestamp = None
+
+        # 上一周期的末端位置（3D），用于位置差分判断阻尼档位。
+        # 第一周期为 None，此时位置速度为 0，走中档。
+        self.prev_end_position = None
+        # 上一周期位置差分的时间戳。
+        self.prev_position_timestamp = None
 
         # LOCKED 状态触发标志，本期默认 False。
         # 后续接入外部传感器（如按钮等）后由外部设置。
@@ -699,11 +727,16 @@ class Controller:
     # 利用 SDK 的 stop_on_control_mode(method=0x11) 保持锁力。
     # 每周期重复调用是幂等的，舵机收到相同指令不会报错。
     def handle_locked(self, manager):
+        lock_power = self.config.get("lock_power", DEFAULTS["lock_power"])
         for servo_id in self.config["servo_ids"]:
+            servo_state = self.shared_state["servos"].get(servo_id, {})
+            if not servo_state.get("online", False):
+                continue
             try:
-                manager.stop_on_control_mode(int(servo_id), method=0x11, power=500)
-            except Exception:
-                pass
+                manager.stop_on_control_mode(int(servo_id), 0x11, lock_power)
+            except Exception as exc:
+                if self.rospy is not None:
+                    self.rospy.logerr("舵机 %d 锁定失败: %s", servo_id, exc)
 
     # 错误保护状态处理：预留给停机、释放或等待人工复位。
     def handle_error(self, manager):
@@ -723,10 +756,14 @@ class Controller:
         if self.lock_requested and current_state == STATE_HOLD:
             self.set_control_state(self.shared_state, self.state_lock, STATE_LOCKED)
             self.lock_requested = False
+            self.unlock_requested = False
+            self.handle_locked(manager)
+            self._clear_telemetry()
             return
         if self.unlock_requested and current_state == STATE_LOCKED:
             self.set_control_state(self.shared_state, self.state_lock, STATE_HOLD)
             self.unlock_requested = False
+            self.lock_requested = False
             return
 
         if current_state == STATE_START:
@@ -838,7 +875,8 @@ class Controller:
             a = arm_params.joints_length[i] if i < len(arm_params.joints_length) else 0.0
             alpha = arm_params.joints_twist[i] if i < len(arm_params.joints_twist) else 0.0
             d = arm_params.joints_offset[i] if i < len(arm_params.joints_offset) else 0.0
-            dh_table.append({"a": a, "alpha": alpha, "d": d, "theta": 0.0})
+            theta_offset = arm_params.joints_theta[i] if i < len(arm_params.joints_theta) else 0.0
+            dh_table.append({"a": a, "alpha": alpha, "d": d, "theta": 0.0, "theta_offset": theta_offset})
         return dh_table
 
     # 3D 正运动学。
@@ -922,10 +960,12 @@ class Controller:
 
     # 把遥测数据写入共享状态（末端速度、阻尼档位、阻尼功率）。
     # 一次锁写入三个字段，减少锁竞争。
-    def _write_telemetry(self, v_end, mode_code, damping_powers):
+    def _write_telemetry(self, v_end, mode_code, damping_powers, p_end=None):
         self.state_lock.acquire()
         try:
             self.shared_state["end_velocity"] = [float(v_end[0]), float(v_end[1]), float(v_end[2])]
+            if p_end is not None:
+                self.shared_state["end_position"] = [float(p_end[0]), float(p_end[1]), float(p_end[2])]
             self.shared_state["damping_mode"] = int(mode_code)
             self.shared_state["damping_powers"] = dict(damping_powers)
         finally:
@@ -936,17 +976,38 @@ class Controller:
         self.state_lock.acquire()
         try:
             self.shared_state["end_velocity"] = [0.0, 0.0, 0.0]
+            self.shared_state["end_position"] = [0.0, 0.0, 0.0]
             self.shared_state["damping_mode"] = 0
             self.shared_state["damping_powers"] = {}
         finally:
             self.state_lock.release()
+
+    # ===== 末端位置差分速度 + 档位选择 =====
+
+    # 用末端位置差分计算速度，天然包含当前姿态信息。
+    # 比纯 Jacobian @ omega 更可靠地反映"末端高度在上升还是下降"。
+    @staticmethod
+    def compute_position_velocity(current_position, prev_position, dt):
+        if prev_position is None or dt <= 1e-6:
+            return np.zeros(3)
+        return (current_position - prev_position) / dt
+
+    # 根据末端竖直速度选择阻尼档位。
+    # 1=LOW(逆重力/上抬) 2=MID(水平/静止) 3=HIGH(顺重力/下坠)
+    @staticmethod
+    def select_damping_mode(vz, threshold):
+        if vz > threshold:
+            return 1
+        if vz < -threshold:
+            return 3
+        return 2
 
     # ===== 三档动态阻尼 =====
     # 执行一次完整的 3D 动态阻尼解算和下发。
     # 这是控制线程在 HOLD 状态下每周期调用的主方法。
     # 流程：
     # 1. 分类关节 → 2. 构建 3D DH → 3. 读角度 → 4. 3D FK → 5. 3D Jacobian
-    # 6. 角度差分 → 末端速度 vz → 判断顺逆重力 → 三档切换 → 下发 → 写遥测
+    # 6. 末端位置差分 → vz → 判断顺逆重力 → 三档切换 → 下发 → 写遥测
     def apply_dynamic_damping(self, manager):
         arm = self.config.get("arm_params")
         if arm is None:
@@ -968,9 +1029,9 @@ class Controller:
                 servo_state = self.shared_state["servos"].get(servo_id, {})
                 angle_deg = servo_state.get("angle")
                 if angle_deg is None:
-                    # 角度数据尚未就绪，跳过本轮不下发，等下一周期再试。
-                    return
-                dh_table[i]["theta"] = math.radians(angle_deg)
+                    # 舵机不在线或数据未就绪，默认 0°。
+                    angle_deg = 0.0
+                dh_table[i]["theta"] = math.radians(angle_deg) + dh_table[i].get("theta_offset", 0.0)
         finally:
             self.state_lock.release()
 
@@ -981,10 +1042,20 @@ class Controller:
         # 5. 3D 雅可比矩阵（3×N_total，含所有关节列）。
         J_3d = self.compute_jacobian_3d(joint_transforms, p_end)
 
-        # 6. 角度差分 → 关节角速度 → 末端速度。
-        current_angles = np.array([row["theta"] for row in dh_table])
+        # 6. 末端位置差分 → 速度（用于档位判断）。
+        #    用位置差分而不是 Jacobian@omega，因为位置差分天然包含当前姿态，
+        #    同样的舵机角速度在机械臂转到另一端后，末端高度变化方向会反过来。
         current_time = time.time()
 
+        if self.prev_position_timestamp is not None:
+            dt_pos = current_time - self.prev_position_timestamp
+        else:
+            dt_pos = 0.0
+
+        v_pos = self.compute_position_velocity(p_end, self.prev_end_position, dt_pos)
+
+        # Jacobian 速度仍保留用于遥测对比和后续诊断。
+        current_angles = np.array([row["theta"] for row in dh_table])
         if self.prev_angles is not None and self.prev_timestamp is not None:
             dt = current_time - self.prev_timestamp
             if dt > 1e-6:
@@ -992,12 +1063,12 @@ class Controller:
             else:
                 omegas = np.zeros_like(current_angles)
         else:
-            # 第一周期没有历史数据，速度为零，走中档。
             omegas = np.zeros_like(current_angles)
+        v_jacobian = J_3d @ omegas
 
-        # 末端速度 v = J_3d · ω → (vx, vy, vz)
-        v_end = J_3d @ omegas
-        vz = v_end[2]
+        # 末端速度发 v_pos（位置差分速度），末端位置单独发 p_end。
+        v_end = v_pos
+        vz = v_pos[2]
 
         # 8. 三档末端合阻尼预算（mW）
         # 三档是末端总预算，切向关节按雅可比列范数权重分发这个预算。
@@ -1014,12 +1085,8 @@ class Controller:
 
         # 10. 切向舵机：三档末端预算，按雅可比权重分发到各关节。
         # 先确定档位码（0=非HOLD后的默认, 1=low, 2=mid, 3=high）。
-        if vz > vz_threshold:
-            mode_code = 1
-        elif vz < -vz_threshold:
-            mode_code = 3
-        else:
-            mode_code = 2
+        # 档位用末端位置差分速度判断，避免同一舵机速度在不同姿态下方向误判。
+        mode_code = self.select_damping_mode(vz, vz_threshold)
 
         # 收集每个舵机的目标阻尼功率，写入遥测。
         damping_powers = {}
@@ -1030,10 +1097,12 @@ class Controller:
             # 没有切向关节，只记轴向功率，下发后直接返回。
             for sid in axial_ids:
                 manager.set_damping(sid, damping_powers[sid])
-            self._write_telemetry(v_end, mode_code, damping_powers)
-            # 保存本周期角度和时间戳，供下周期差分使用。
+            self._write_telemetry(v_end, mode_code, damping_powers, p_end)
+            # 保存本周期角度、末端位置和时间戳，供下周期差分使用。
             self.prev_angles = current_angles
             self.prev_timestamp = current_time
+            self.prev_end_position = p_end.copy()
+            self.prev_position_timestamp = current_time
             return
 
         # 提取切向列 → 阻尼分发只用切向列，轴向列不参与。
@@ -1055,11 +1124,13 @@ class Controller:
             manager.set_damping(sid, pw)
 
         # 11. 写入遥测数据到共享状态。
-        self._write_telemetry(v_end, mode_code, damping_powers)
+        self._write_telemetry(v_end, mode_code, damping_powers, p_end)
 
-        # 12. 保存本周期角度和时间戳，供下周期差分使用。
+        # 12. 保存本周期角度、末端位置和时间戳，供下周期差分使用。
         self.prev_angles = current_angles
         self.prev_timestamp = current_time
+        self.prev_end_position = p_end.copy()
+        self.prev_position_timestamp = current_time
 
     # 控制线程主循环。
     def run(self):
@@ -1162,7 +1233,7 @@ def main():
         stop_event=stop_event,
         rospy=rospy,
     )
-    start_thread("key_hold_thread", key_thread.run, ())
+    key_hold_thread = start_thread("key_hold_thread", key_thread.run, ())
 
     try:
         # main 主线程不做具体控制，只负责活着等待。
@@ -1178,6 +1249,8 @@ def main():
         ros_thread.join(2.0)
 
         control_thread.join(2.0)
+
+        key_hold_thread.join(2.0)
 
 
 if __name__ == "__main__":

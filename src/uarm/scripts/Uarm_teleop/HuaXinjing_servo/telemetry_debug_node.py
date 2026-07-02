@@ -5,6 +5,7 @@
 订阅话题：
   /servo_angles         — 各舵机角度 (度)
   /servo_end_velocity   — 末端 3D 速度 [vx, vy, vz] (m/s)
+  /servo_end_position   — 末端 3D 位置 [x, y, z] (m)
   /servo_damping_mode   — 阻尼档位码 [0/1/2/3]
   /servo_damping_powers — 各舵机目标阻尼功率 (mW)
 
@@ -85,6 +86,7 @@ def render(cache):
 
     angles = data.get("angles")
     velocity = data.get("end_velocity")
+    position = data.get("end_position")
     mode_raw = data.get("damping_mode")
     powers = data.get("damping_powers")
 
@@ -109,6 +111,9 @@ def render(cache):
         "",
         "【末端速度 /servo_end_velocity (m/s)】",
         "  " + fmt_array(velocity),
+        "",
+        "【末端位置 /servo_end_position (m)】",
+        "  " + fmt_array(position),
         "",
         "【阻尼档位 /servo_damping_mode】",
         "  %s" % mode_str,
@@ -139,6 +144,7 @@ def main():
 
     rospy.Subscriber("/servo_angles",        Float64MultiArray, make_callback("angles"))
     rospy.Subscriber("/servo_end_velocity",  Float64MultiArray, make_callback("end_velocity"))
+    rospy.Subscriber("/servo_end_position",  Float64MultiArray, make_callback("end_position"))
     rospy.Subscriber("/servo_damping_mode",   Float64MultiArray, make_callback("damping_mode"))
     rospy.Subscriber("/servo_damping_powers", Float64MultiArray, make_callback("damping_powers"))
 

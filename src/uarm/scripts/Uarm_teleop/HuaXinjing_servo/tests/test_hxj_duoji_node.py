@@ -7,6 +7,11 @@ import numpy as np
 
 import hxj_duoji_node as node
 
+try:
+    from key_hold_thread import KeyHoldThread  # type: ignore[import-not-found]
+except ImportError:
+    KeyHoldThread = getattr(node, "KeyHoldThread", None)
+
 
 class FakeServo:
     def __init__(self, angle, current=0.0, voltage=0.0, power=0.0, temp=0.0, status=0):
@@ -155,16 +160,17 @@ class HxjDuojiNodeTest(unittest.TestCase):
         arm = config_reader.values["arm_params"]
         self.assertEqual(arm.joint_types, ["axial", "tangential", "tangential"])
 
-    def test_arm_parses_twist_and_offset(self):
-        """验证 Arm 对象包含 joints_twist 和 joints_offset。"""
+    def test_arm_parses_dh_alpha_d_theta(self):
+        """验证 Arm 对象包含 standard DH 的 alpha/d/theta 字段。"""
         config_reader = node.ServoConfig()
         arm = config_reader.values["arm_params"]
         # axial → α=π/2, tangential → α=0（JSON 写的 1.5708，容差 4 位）
         self.assertAlmostEqual(arm.joints_twist[0], math.pi / 2, places=4)
         self.assertAlmostEqual(arm.joints_twist[1], 0.0)
-        self.assertAlmostEqual(arm.joints_twist[2], 0.0)
-        # offset 默认 0
-        self.assertEqual(arm.joints_offset, [0.0, 0.0, 0.0])
+        # 当前 2 轴调试构型：第一段沿 z 轴 d=0.08，第二段 a(l)=0.15 且 theta 偏置 π/2。
+        self.assertEqual(arm.joints_offset, [0.08, 0.0])
+        self.assertAlmostEqual(arm.joints_theta[0], 0.0)
+        self.assertAlmostEqual(arm.joints_theta[1], math.pi / 2, places=4)
 
     def test_build_arm_from_dict_with_twist(self):
         """验证 build_arm_from_dict 读取 twist 字段。"""
@@ -273,6 +279,8 @@ class HxjDuojiNodeTest(unittest.TestCase):
         self.assertEqual(config["end_damping_mid"], node.DEFAULTS["end_damping_mid"])
         self.assertEqual(config["end_damping_high"], node.DEFAULTS["end_damping_high"])
         self.assertEqual(config["base_damping_power"], node.DEFAULTS["base_damping_power"])
+        self.assertEqual(config["lock_power"], node.DEFAULTS["lock_power"])
+        self.assertEqual(config["lock_power"], 6000)
         self.assertEqual(config["max_damping_power"], node.DEFAULTS["max_damping_power"])
         self.assertEqual(config["vz_threshold"], node.DEFAULTS["vz_threshold"])
 
@@ -289,6 +297,40 @@ class HxjDuojiNodeTest(unittest.TestCase):
         worker = node.Controller({}, shared_state, lock, stop_event, None)
         self.assertFalse(worker.lock_requested)
         self.assertFalse(worker.unlock_requested)
+
+    def test_key_hold_thread_is_imported(self):
+        """测试文件能导入 KeyHoldThread，供按键线程测试使用。"""
+        self.assertIsNotNone(KeyHoldThread)
+
+    def test_key_hold_thread_sets_controller_flags(self):
+        """KeyHoldThread 只设置 Controller flag，不直接改控制状态。"""
+        lock = node.threading.Lock()
+        shared_state = node.ServoConfig.create_shared_state_from_values([0], 1)
+        stop_event = node.threading.Event()
+        worker = node.Controller({}, shared_state, lock, stop_event, None)
+        key_thread_cls = KeyHoldThread
+        assert key_thread_cls is not None
+        key_thread = key_thread_cls(worker, shared_state, lock, stop_event, rospy=None)
+
+        key_thread.request_unlock()
+        key_thread.request_lock()
+
+        self.assertTrue(worker.unlock_requested)
+        self.assertTrue(worker.lock_requested)
+        self.assertEqual(shared_state["control_state"], node.STATE_START)
+
+    def test_key_hold_thread_reads_current_state(self):
+        """KeyHoldThread 通过锁安全读取当前控制状态。"""
+        lock = node.threading.Lock()
+        shared_state = node.ServoConfig.create_shared_state_from_values([0], 1)
+        shared_state["control_state"] = node.STATE_LOCKED
+        stop_event = node.threading.Event()
+        worker = node.Controller({}, shared_state, lock, stop_event, None)
+        key_thread_cls = KeyHoldThread
+        assert key_thread_cls is not None
+        key_thread = key_thread_cls(worker, shared_state, lock, stop_event, rospy=None)
+
+        self.assertEqual(key_thread.get_current_state(), node.STATE_LOCKED)
 
     def test_state_start_exists_and_is_default(self):
         """STATE_START 存在，且 shared_state 初始状态为 START。"""
@@ -310,6 +352,7 @@ class HxjDuojiNodeTest(unittest.TestCase):
         """shared_state 初始包含 3 个遥测字段，默认值正确。"""
         shared_state = node.ServoConfig.create_shared_state_from_values([0, 1, 2], 3)
         self.assertEqual(shared_state["end_velocity"], [0.0, 0.0, 0.0])
+        self.assertEqual(shared_state["end_position"], [0.0, 0.0, 0.0])
         self.assertEqual(shared_state["damping_mode"], 0)
         self.assertEqual(shared_state["damping_powers"], {})
 
@@ -318,11 +361,13 @@ class HxjDuojiNodeTest(unittest.TestCase):
         lock = node.threading.Lock()
         shared_state = node.ServoConfig.create_shared_state_from_values([0, 1], 2)
         shared_state["end_velocity"] = [0.1, -0.2, 0.05]
+        shared_state["end_position"] = [0.2, 0.1, 0.15]
         shared_state["damping_mode"] = 2
         shared_state["damping_powers"] = {0: 500, 1: 300}
 
         copied = node.RosPublisher.copy_shared_state(shared_state, lock)
         self.assertEqual(copied["end_velocity"], [0.1, -0.2, 0.05])
+        self.assertEqual(copied["end_position"], [0.2, 0.1, 0.15])
         self.assertEqual(copied["damping_mode"], 2)
         self.assertEqual(copied["damping_powers"], {0: 500, 1: 300})
 
@@ -344,9 +389,11 @@ class HxjDuojiNodeTest(unittest.TestCase):
         worker = node.Controller({}, shared_state, lock, node.threading.Event(), None)
 
         v_end = node.np.array([0.1, -0.2, 0.05])
-        worker._write_telemetry(v_end, 3, {0: 500, 1: 800, 2: 200})
+        p_end = node.np.array([0.2, 0.1, 0.15])
+        worker._write_telemetry(v_end, 3, {0: 500, 1: 800, 2: 200}, p_end)
 
         self.assertEqual(shared_state["end_velocity"], [0.1, -0.2, 0.05])
+        self.assertEqual(shared_state["end_position"], [0.2, 0.1, 0.15])
         self.assertEqual(shared_state["damping_mode"], 3)
         self.assertEqual(shared_state["damping_powers"], {0: 500, 1: 800, 2: 200})
 
@@ -355,6 +402,7 @@ class HxjDuojiNodeTest(unittest.TestCase):
         lock = node.threading.Lock()
         shared_state = node.ServoConfig.create_shared_state_from_values([0], 1)
         shared_state["end_velocity"] = [0.1, 0.2, 0.3]
+        shared_state["end_position"] = [0.2, 0.1, 0.15]
         shared_state["damping_mode"] = 2
         shared_state["damping_powers"] = {0: 500}
 
@@ -362,6 +410,7 @@ class HxjDuojiNodeTest(unittest.TestCase):
         worker._clear_telemetry()
 
         self.assertEqual(shared_state["end_velocity"], [0.0, 0.0, 0.0])
+        self.assertEqual(shared_state["end_position"], [0.0, 0.0, 0.0])
         self.assertEqual(shared_state["damping_mode"], 0)
         self.assertEqual(shared_state["damping_powers"], {})
 
