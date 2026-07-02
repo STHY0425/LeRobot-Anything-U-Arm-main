@@ -36,8 +36,8 @@ import tty
 # 如果超过这个时间没有收到 'k' 键，则认为用户已松开按键。
 # 配合 xset r rate 250 40，首键延迟为 250ms，之后每 25ms 重复一次。
 # 阈值必须大于首键延迟，否则第一个字符到重复之间的间隙会被误判为松开。
-# 0.35s 留出足够余量。
-DEFAULT_HOLD_TIMEOUT = 0.35
+# 终端按键重复在 ROS/串口负载下可能出现 0.3s 以上抖动，0.5s 折中响应和稳定性。
+DEFAULT_HOLD_TIMEOUT = 0.5
 
 # 默认监听的按键字符。
 DEFAULT_HOLD_KEY = "k"
@@ -78,7 +78,7 @@ class KeyHoldThread:
             shared_state: 线程共享状态字典（只读，用于判断当前状态）。
             state_lock:   threading.Lock，读 shared_state 时加锁。
             stop_event:   threading.Event，外部停止信号。
-            hold_timeout: 按键松开判定阈值（秒），默认 0.25s。
+            hold_timeout: 按键松开判定阈值（秒），默认 0.5s。
             hold_key:     监听的按键字符，默认 'k'。
             poll_rate:    键盘轮询频率（Hz），默认 50。
             rospy:        rospy 模块引用，用于日志输出（可选）。
@@ -196,13 +196,23 @@ class KeyHoldThread:
 
         边沿触发确保每次按住/松开只请求一次，不会重复下发。
         """
-        self.setup_keyboard()
         poll_delay = 1.0 / float(self.poll_rate)
+        keyboard_ready = False
 
         try:
             self._log_info("按键线程已启动（poll_rate=%dHz, timeout=%.2fs）", self.poll_rate, self.hold_timeout)
 
             while not self.stop_event.is_set():
+                # START 状态会用 input() 读取菜单，按键线程不能抢 stdin。
+                if self.get_current_state() == "START":
+                    self.key_was_held = False
+                    time.sleep(poll_delay)
+                    continue
+
+                if not keyboard_ready:
+                    self.setup_keyboard()
+                    keyboard_ready = True
+
                 # 1. 读取键盘缓冲区。
                 self.check_keyboard()
 
