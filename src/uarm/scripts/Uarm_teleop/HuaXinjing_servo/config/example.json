@@ -4,7 +4,7 @@
         "length": "m",
         "mass": "kg"
     },
-    "dof": 2,
+    "dof": 3,
     "joints": {
         "joint1": {
             "type": "axial",
@@ -21,10 +21,22 @@
         "joint2": {
             "type": "tangential",
             "link": {
-                "l": 0.15,
+                "l": 0.084,
                 "d": 0.0,
                 "alpha": 0.0,
                 "theta": 1.5708,
+                "mass": 0.16,
+                "center_of_mass": [0.0,0.0,0.04]
+            },
+            "actuator_mass": 0.055
+        },
+        "joint3": {
+            "type": "tangential",
+            "link": {
+                "l": 0.25,
+                "d": 0.0,
+                "alpha": 0.0,
+                "theta": 0.0,
                 "mass": 0.12,
                 "center_of_mass": [0.075,0.0,0.0]
             },
