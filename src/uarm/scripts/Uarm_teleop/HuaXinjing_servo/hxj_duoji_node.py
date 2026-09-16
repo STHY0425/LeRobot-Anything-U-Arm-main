@@ -39,7 +39,7 @@ STATE_LOCKED = "LOCKED"    # 锁死：所有舵机保持锁力，完全固定
 STATE_ERROR = "ERROR"      # 错误：预留给停机、释放、等待人工处理
 
 
-# 全局默认配置，
+# 全局默认配置，置于代码开头，方便调试时直接修改。
 DEFAULTS = {
     # 三档末端合阻尼预算（mW），切向关节按雅可比列范数权重分发这个预算。
     "end_damping": 1000,       # 末端合阻尼预算（兼容旧字段，用作是否启用阻尼的开关）
@@ -803,18 +803,15 @@ class Controller:
     #     → apply_damping（下发 set_damping）
     #
     # 核心设计原则：
-    # 1. 阻尼功率直接是 mW，不经过力矩转换。这款舵机的 set_damping
-    #    只能延缓角度变化，不是输出力矩。
-    # 2. 模块化可塑性：3-7 轴任意 axial/tangential 构型自动适配，
-    #    DH 表行数 = 切向关节数，雅可比列数 = 切向关节数。
+    # 1. 阻尼功率直接是 mW，不经过力矩转换。这款舵机的 set_damping 只能延缓角度变化，不是输出力矩。
+    # 2. 模块化可塑性：3-7 轴任意 axial/tangential 构型自动适配，DH 表行数 = 切向关节数，雅可比列数 = 切向关节数。
     # 3. 轴向关节不参与分发，固定 base_damping_power。
     # 4. 切向关节按雅可比列范数分配 end_damping 预算，预算守恒。
 
     # 根据 arm_params.joint_types 分类舵机 ID。
     # 遍历每个关节，读取类型字符串，把轴向和切向分别收集。
     #
-    # 3D 运动学已包含所有关节（含轴向），DH 参数 a 直接取 joints_length[i]，
-    # 中间轴向杆长自然包含在 3D DH 表里，不再需要单独算"切向有效杆长"。
+    # 3D 运动学已包含所有关节（含轴向），DH 参数 a 直接取 joints_length[i]，中间轴向杆长自然包含在 3D DH 表里，不再需要单独算"切向有效杆长"。
     #
     # 返回三元组 (axial_ids, tangential_ids, tangential_indices)：
     # - axial_ids: 轴向关节对应的舵机 ID 列表
