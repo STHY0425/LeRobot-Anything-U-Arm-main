@@ -1,0 +1,2309 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>机械臂调试控制台</title>
+  <!-- Three.js (本地资源，避开 CDN MIME 问题) -->
+  <script src="/assets/threejs/three.min.js"></script>
+  <script src="/assets/threejs/OrbitControls.js"></script>
+  <script src="/assets/vendor/STLLoader.js"></script>
+  <script>
+    // 确保 STLLoader 可用
+    window.addEventListener('load', function() {
+      if (typeof STLLoader === 'undefined') {
+        console.error('STLLoader not loaded!');
+      }
+    });
+  </script>
+  <style>
+    :root {
+      --bg-primary: #080c14;
+      --bg-secondary: #0d1421;
+      --bg-card: #111927;
+      --bg-card-hover: #162032;
+      --border: #1a2a40;
+      --accent: #00e5ff;
+      --accent-dim: #0091a1;
+      --accent-glow: rgba(0, 229, 255, 0.15);
+      --accent-secondary: #ff9100;
+      --accent-secondary-dim: #a85f00;
+      --accent-secondary-glow: rgba(255, 145, 0, 0.15);
+      --text-primary: #e8edf5;
+      --text-secondary: #7a90ab;
+      --text-dim: #3d5068;
+      --danger: #ff4757;
+      --success: #2ed573;
+      --warning: #ffa502;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+      background-color: var(--bg-primary);
+      color: var(--text-primary);
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    .bg-grid {
+      position: fixed; inset: 0;
+      background-image:
+        linear-gradient(rgba(0, 229, 255, 0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0, 229, 255, 0.03) 1px, transparent 1px);
+      background-size: 50px 50px;
+      pointer-events: none; z-index: 0;
+    }
+    .bg-glow {
+      position: fixed; width: 600px; height: 600px;
+      border-radius: 50%; filter: blur(150px);
+      opacity: 0.07; pointer-events: none; z-index: 0;
+    }
+    .bg-glow-1 { top: -200px; left: -100px; background: var(--accent); }
+    .bg-glow-2 { bottom: -200px; right: -100px; background: var(--accent-secondary); }
+
+    .app-container {
+      position: relative; z-index: 1;
+      max-width: 1100px; margin: 0 auto;
+      padding: 32px 24px 60px;
+    }
+
+    /* Header */
+    .header {
+      display: flex; align-items: center;
+      justify-content: space-between;
+      margin-bottom: 40px; padding-bottom: 24px;
+      border-bottom: 1px solid var(--border);
+    }
+    .header-left { display: flex; align-items: center; gap: 16px; }
+    .logo-icon { width: 44px; height: 44px; flex-shrink: 0; }
+    .header-title h1 { font-size: 20px; font-weight: 700; color: var(--text-primary); }
+    .header-title .subtitle {
+      font-size: 12px; color: var(--text-secondary);
+      margin-top: 2px; letter-spacing: 2px; text-transform: uppercase;
+    }
+
+    .connection-badge {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 14px; border-radius: 20px; font-size: 12px; font-weight: 600;
+      border: 1px solid var(--border); background: var(--bg-card);
+      cursor: pointer; transition: all 0.3s ease;
+    }
+    .connection-badge:hover { border-color: var(--accent); background: var(--accent-glow); }
+    .connection-badge.connected { border-color: var(--success); color: var(--success); background: rgba(46, 213, 115, 0.08); }
+    .status-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--text-dim); transition: background 0.3s;
+    }
+    .connection-badge.connected .status-dot {
+      background: var(--success); box-shadow: 0 0 8px var(--success);
+      animation: pulse-dot 2s ease-in-out infinite;
+    }
+    @keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+    .content-grid {
+      display: grid;
+      grid-template-columns: 1fr 400px;
+      gap: 24px; align-items: start;
+    }
+    @media (max-width: 900px) { .content-grid { grid-template-columns: 1fr; } }
+
+    .panel {
+      background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: 16px; overflow: hidden;
+    }
+    .panel-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 16px 20px; border-bottom: 1px solid var(--border);
+      background: var(--bg-secondary);
+    }
+    .panel-title {
+      display: flex; align-items: center; gap: 10px;
+      font-size: 13px; font-weight: 700; letter-spacing: 1.5px;
+      text-transform: uppercase; color: var(--text-secondary);
+    }
+    .panel-title svg { color: var(--accent); }
+    .panel-actions { display: flex; gap: 8px; }
+
+    .sliders-container { padding: 8px 0; }
+
+    .slider-row {
+      padding: 16px 20px; border-bottom: 1px solid var(--border);
+      transition: background 0.2s;
+    }
+    .slider-row:last-child { border-bottom: none; }
+    .slider-row:hover { background: rgba(0, 229, 255, 0.02); }
+
+    .slider-meta {
+      display: flex; justify-content: space-between;
+      align-items: baseline; margin-bottom: 12px;
+    }
+    .slider-label-group { display: flex; align-items: center; gap: 8px; }
+    .joint-index {
+      width: 22px; height: 22px; border-radius: 6px;
+      background: var(--accent-glow); border: 1px solid rgba(0, 229, 255, 0.25);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 11px; font-weight: 700; color: var(--accent); flex-shrink: 0;
+    }
+    .joint-label { font-size: 14px; font-weight: 600; color: var(--text-primary); }
+    .joint-name { font-size: 11px; color: var(--text-dim); margin-left: 4px; font-weight: 400; }
+
+    .slider-values { display: flex; align-items: center; gap: 12px; }
+    .current-value {
+      font-size: 15px; font-weight: 700; color: var(--accent);
+      min-width: 80px; text-align: right; font-variant-numeric: tabular-nums;
+      transition: color 0.3s;
+    }
+    .current-value.changing { color: var(--accent-secondary); }
+
+    .range-labels {
+      display: flex; justify-content: space-between;
+      margin-top: 6px; font-size: 10px; color: var(--text-dim);
+    }
+
+    .slider-wrapper { position: relative; height: 36px; display: flex; align-items: center; }
+
+    input[type="range"] {
+      -webkit-appearance: none; appearance: none;
+      width: 100%; height: 4px; border-radius: 2px;
+      background: var(--border); outline: none; cursor: pointer;
+      position: relative; z-index: 2;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none; appearance: none;
+      width: 18px; height: 18px; border-radius: 50%;
+      background: var(--accent); cursor: pointer;
+      border: 2px solid var(--bg-primary);
+      box-shadow: 0 0 12px rgba(0, 229, 255, 0.4);
+      transition: transform 0.15s ease, box-shadow 0.15s ease;
+      position: relative; z-index: 3;
+    }
+    input[type="range"]::-moz-range-thumb {
+      width: 18px; height: 18px; border-radius: 50%;
+      background: var(--accent); cursor: pointer;
+      border: 2px solid var(--bg-primary);
+      box-shadow: 0 0 12px rgba(0, 229, 255, 0.4);
+    }
+    input[type="range"]:hover::-webkit-slider-thumb {
+      transform: scale(1.2);
+      box-shadow: 0 0 18px rgba(0, 229, 255, 0.6);
+    }
+    input[type="range"]:active::-webkit-slider-thumb {
+      transform: scale(1.1); background: #33eeff;
+    }
+
+    .slider-fill-track {
+      position: absolute; left: 0; top: 50%; transform: translateY(-50%);
+      height: 4px; border-radius: 2px;
+      background: linear-gradient(90deg, var(--accent-dim), var(--accent));
+      pointer-events: none; z-index: 1; transition: width 0.05s;
+    }
+
+    /* 重力补偿滑块特殊样式 */
+    .slider-row.gravity-row { background: rgba(255, 145, 0, 0.02); }
+    .slider-row.gravity-row .joint-index {
+      background: var(--accent-secondary-glow);
+      border-color: rgba(255, 145, 0, 0.25);
+      color: var(--accent-secondary);
+    }
+    .slider-row.gravity-row .current-value { color: var(--accent-secondary); }
+    .slider-row.gravity-row input[type="range"]::-webkit-slider-thumb {
+      background: var(--accent-secondary);
+      box-shadow: 0 0 12px rgba(255, 145, 0, 0.4);
+    }
+    .slider-row.gravity-row .slider-fill-track {
+      background: linear-gradient(90deg, var(--accent-secondary-dim), var(--accent-secondary));
+    }
+    .slider-row.gravity-row input[type="range"] {
+      background: linear-gradient(90deg, var(--border) 0%, var(--border) 100%);
+    }
+
+    .btn {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 7px 14px; border-radius: 8px; font-size: 12px; font-weight: 600;
+      cursor: pointer; border: 1px solid var(--border); background: var(--bg-card);
+      color: var(--text-secondary); transition: all 0.2s ease; font-family: inherit;
+    }
+    .btn:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-glow); }
+    .btn-primary { background: rgba(0, 229, 255, 0.1); border-color: rgba(0, 229, 255, 0.3); color: var(--accent); }
+    .btn-primary:hover { background: rgba(0, 229, 255, 0.2); border-color: var(--accent); }
+    .btn-danger { border-color: rgba(255, 71, 87, 0.3); color: var(--danger); background: rgba(255, 71, 87, 0.08); }
+    .btn-danger:hover { border-color: var(--danger); background: rgba(255, 71, 87, 0.15); }
+
+    .sidebar { display: flex; flex-direction: column; gap: 20px; }
+
+    .status-items { padding: 16px 20px; display: flex; flex-direction: column; gap: 14px; }
+    .status-item { display: flex; align-items: center; justify-content: space-between; }
+    .status-key { font-size: 12px; color: var(--text-secondary); }
+    .status-val { font-size: 12px; font-weight: 600; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+    .status-val.online { color: var(--success); }
+    .status-val.offline { color: var(--danger); }
+    .status-val.warning { color: var(--warning); }
+
+    .history-list {
+      padding: 12px 20px; display: flex; flex-direction: column;
+      gap: 6px; max-height: 200px; overflow-y: auto;
+    }
+    .history-list::-webkit-scrollbar { width: 3px; }
+    .history-list::-webkit-scrollbar-track { background: transparent; }
+    .history-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+    .history-item { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--text-dim); padding: 4px 0; }
+    .history-item .hi-time { color: var(--text-dim); font-variant-numeric: tabular-nums; flex-shrink: 0; }
+    .history-item .hi-joint { color: var(--accent); font-weight: 600; flex-shrink: 0; }
+    .history-item .hi-val { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+    .history-empty { text-align: center; padding: 20px 0; color: var(--text-dim); font-size: 12px; }
+
+    .json-preview {
+      padding: 16px 20px; font-family: 'Courier New', Courier, monospace;
+      font-size: 11px; line-height: 1.8; color: var(--text-secondary);
+      max-height: none; height: 520px; overflow-y: auto; white-space: pre;
+      background: var(--bg-primary); border-radius: 0 0 16px 16px;
+    }
+    .json-preview::-webkit-scrollbar { width: 3px; }
+    .json-preview::-webkit-scrollbar-track { background: transparent; }
+    .json-preview::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+    .json-key { color: #7dd3fc; }
+    .json-num { color: #86efac; }
+    .json-str { color: #fcd34d; }
+
+    .footer { margin-top: 40px; text-align: center; font-size: 11px; color: var(--text-dim); letter-spacing: 1px; }
+
+    .toast-container {
+      position: fixed; bottom: 28px; right: 28px; z-index: 9999;
+      display: flex; flex-direction: column; gap: 8px; pointer-events: none;
+    }
+    .toast {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 18px; border-radius: 10px; font-size: 13px; font-weight: 500;
+      border: 1px solid var(--border); background: var(--bg-card);
+      color: var(--text-primary); box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+      pointer-events: auto;
+      animation: toastIn 0.3s ease, toastOut 0.3s ease 2.7s forwards;
+      backdrop-filter: blur(12px);
+    }
+    .toast.success { border-color: var(--success); }
+    .toast.error { border-color: var(--danger); }
+    .toast.warning { border-color: var(--warning); }
+    @keyframes toastIn { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: translateX(0); } }
+    @keyframes toastOut { from { opacity: 1; transform: translateX(0); } to { opacity: 0; transform: translateX(20px); } }
+
+    /* 分组标题 */
+    .section-divider {
+      padding: 10px 20px;
+      background: var(--bg-secondary);
+      border-bottom: 1px solid var(--border);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      color: var(--text-dim);
+    }
+    .section-divider.gravity { color: var(--accent-secondary); border-left: 3px solid var(--accent-secondary); }
+
+    /* 轴数选择器 */
+    .axis-selector {
+      display: flex; gap: 4px;
+    }
+    .axis-btn {
+      padding: 4px 10px; border-radius: 6px; font-size: 12px; font-weight: 600;
+      border: 1px solid var(--border); background: var(--bg-card);
+      color: var(--text-secondary); cursor: pointer; transition: all 0.2s;
+      font-family: inherit;
+    }
+    .axis-btn:hover {
+      border-color: var(--accent); color: var(--accent); background: var(--accent-glow);
+    }
+    .axis-btn.active {
+      border-color: var(--accent); color: var(--accent);
+      background: rgba(0, 229, 255, 0.15);
+      box-shadow: 0 0 8px rgba(0, 229, 255, 0.2);
+    }
+
+    /* 轴分组标题 */
+    .axis-divider {
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .axis-hint { font-size: 10px; font-weight: 400; color: var(--text-dim); letter-spacing: 0; text-transform: none; }
+
+    /* 机械臂实际角度反馈（绿色） */
+    .actual-value {
+      font-size: 11px; font-weight: 600;
+      color: var(--success);
+      background: rgba(76, 201, 130, 0.12);
+      border: 1px solid rgba(76, 201, 130, 0.3);
+      border-radius: 4px; padding: 1px 6px;
+      font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    }
+
+    @media (max-width: 600px) {
+      .app-container { padding: 16px 12px; }
+      .header { flex-direction: column; gap: 16px; align-items: flex-start; }
+      .slider-meta { flex-direction: column; gap: 4px; align-items: flex-start; }
+      .current-value { text-align: left; }
+    }
+
+    /* ─── 3D 仿真画布 ─── */
+    #canvas3d {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+    .sim3d-wrap {
+      position: relative;
+      width: 100%;
+      height: 100%;
+    }
+    .sim3d-overlay {
+      position: absolute; inset: 0;
+      display: flex; align-items: center; justify-content: center;
+      flex-direction: column; gap: 12px;
+      background: rgba(4, 8, 16, 0.7);
+      pointer-events: none;
+      font-size: 12px; color: var(--text-secondary);
+      transition: opacity 0.3s;
+    }
+    .sim3d-overlay.hidden { opacity: 0; }
+    .sim3d-overlay-tr {
+      position: absolute; top: 10px; right: 10px;
+      padding: 6px 12px; border-radius: 6px;
+      background: rgba(8, 12, 20, 0.8);
+      border: 1px solid var(--border);
+      font-size: 11px; color: var(--text-secondary);
+      backdrop-filter: blur(8px);
+      display: flex; gap: 14px; align-items: center;
+    }
+    .sim3d-overlay-bl {
+      position: absolute; bottom: 10px; left: 10px;
+      padding: 6px 12px; border-radius: 6px;
+      background: rgba(8, 12, 20, 0.8);
+      border: 1px solid var(--border);
+      font-size: 11px; color: var(--text-secondary);
+      backdrop-filter: blur(8px);
+      display: flex; gap: 8px; align-items: center; flex-wrap: wrap; max-width: 90%;
+    }
+    .sim3d-overlay-br {
+      position: absolute; bottom: 10px; right: 10px;
+      padding: 6px 12px; border-radius: 6px;
+      background: rgba(8, 12, 20, 0.8);
+      border: 1px solid var(--border);
+      font-size: 10px; color: var(--text-dim);
+      backdrop-filter: blur(8px);
+      display: flex; gap: 6px; align-items: center;
+    }
+    .sim3d-btn {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 5px 10px; border-radius: 6px; font-size: 11px; font-weight: 600;
+      border: 1px solid var(--border); background: var(--bg-card);
+      color: var(--text-secondary); cursor: pointer; transition: all 0.2s;
+      font-family: inherit;
+    }
+    .sim3d-btn:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-glow); }
+    .sim3d-btn.on { border-color: var(--accent); color: var(--accent); background: var(--accent-glow); }
+    .sim3d-divider { width: 1px; height: 14px; background: var(--border); }
+    .param-chip {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 2px 8px; border-radius: 4px;
+      background: var(--bg-card); border: 1px solid var(--border);
+      font-family: 'Courier New', monospace; font-size: 10px;
+    }
+    .param-chip .chip-label { color: var(--text-dim); }
+    .param-chip .chip-val { color: var(--accent); font-weight: 700; }
+
+    /* ─── 仿真视频流视图 ─── */
+    .stream-canvas-wrap {
+      position: relative;
+      width: 100%;
+      height: 360px;
+      background: #020408;
+      overflow: hidden;
+    }
+    .stream-canvas-wrap img {
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+    .stream-overlay {
+      position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+      flex-direction: column; gap: 12px; color: var(--text-secondary); font-size: 13px;
+      background: rgba(4, 8, 16, 0.85);
+      transition: opacity 0.25s;
+    }
+    .stream-overlay.hidden { opacity: 0; pointer-events: none; }
+    .stream-spinner {
+      width: 28px; height: 28px; border: 2px solid var(--border); border-top-color: var(--accent);
+      border-radius: 50%; animation: spin 0.9s linear infinite;
+    }
+    .stream-overlay-tr {
+      position: absolute; top: 12px; right: 12px; padding: 8px 12px;
+      background: rgba(8, 12, 20, 0.75); border: 1px solid var(--border);
+      border-radius: 8px; font-size: 11px; color: var(--text-secondary);
+      backdrop-filter: blur(8px); pointer-events: none;
+      font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    }
+    .stream-overlay-bl {
+      position: absolute; bottom: 12px; left: 12px; padding: 6px 10px;
+      background: rgba(8, 12, 20, 0.75); border: 1px solid var(--border);
+      border-radius: 8px; color: var(--text-secondary);
+      backdrop-filter: blur(8px); pointer-events: none;
+      font-family: 'JetBrains Mono', 'Fira Code', monospace;
+      z-index: 5;
+    }
+    .stream-toolbar {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 12px 20px; border-top: 1px solid var(--border);
+      background: var(--bg-secondary);
+    }
+    .stream-toolbar-left { display: flex; align-items: center; gap: 12px; font-size: 12px; color: var(--text-secondary); }
+    .stream-toolbar-left .dot {
+      width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim);
+    }
+    .stream-toolbar-left .dot.live { background: var(--success); box-shadow: 0 0 6px var(--success); animation: pulse-dot 2s infinite; }
+    .stream-toolbar-left .dot.err { background: var(--danger); }
+    .stream-toolbar-right { display: flex; gap: 8px; }
+    .stream-toggle {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 5px 10px; border-radius: 6px; font-size: 11px; font-weight: 600;
+      border: 1px solid var(--border); background: var(--bg-card); color: var(--text-secondary);
+      cursor: pointer; transition: all 0.2s; user-select: none;
+    }
+    .stream-toggle:hover { border-color: var(--accent); color: var(--accent); }
+    .stream-toggle.on { border-color: var(--accent); color: var(--accent); background: var(--accent-glow); }
+  </style>
+</head>
+<body>
+
+<div class="bg-grid"></div>
+<div class="bg-glow bg-glow-1"></div>
+<div class="bg-glow bg-glow-2"></div>
+
+<div class="app-container">
+
+  <!-- 顶部标题栏 -->
+  <header class="header">
+    <div class="header-left">
+      <svg class="logo-icon" viewBox="0 0 44 44" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <rect width="44" height="44" rx="12" fill="#0d1421"/>
+        <rect x="1" y="1" width="42" height="42" rx="11" stroke="#1a2a40" stroke-width="1"/>
+        <rect x="16" y="30" width="12" height="6" rx="2" fill="#1a2a40"/>
+        <rect x="18" y="22" width="8" height="10" rx="2" fill="#0091a1"/>
+        <circle cx="22" cy="22" r="4" fill="#00e5ff"/>
+        <circle cx="22" cy="22" r="2" fill="#080c14"/>
+        <rect x="20" y="10" width="4" height="13" rx="2" fill="#00e5ff" transform="rotate(-30 22 22)"/>
+        <circle cx="16" cy="10" r="3.5" fill="#00e5ff"/>
+        <circle cx="16" cy="10" r="1.8" fill="#080c14"/>
+        <rect x="14" y="2" width="4" height="10" rx="2" fill="#0091a1" transform="rotate(-60 16 10)"/>
+        <circle cx="11" cy="3" r="2.5" fill="#00e5ff"/>
+        <circle cx="11" cy="3" r="1.2" fill="#080c14"/>
+        <rect x="8.5" y="-2" width="2" height="7" rx="1" fill="#ff9100" transform="rotate(-20 9.5 1)"/>
+        <rect x="12" y="-3" width="2" height="7" rx="1" fill="#ff9100" transform="rotate(-50 13 -0.5)"/>
+      </svg>
+      <div class="header-title">
+        <h1>机械臂调试控制台</h1>
+        <div class="subtitle">舵机重力补偿参数调试</div>
+      </div>
+    </div>
+    <div class="connection-badge" id="connBadge" onclick="toggleConnection()">
+      <span class="status-dot" id="statusDot"></span>
+      <span id="connLabel">未连接</span>
+    </div>
+  </header>
+
+  <!-- 主内容区 -->
+  <div class="content-grid">
+
+    <!-- 左侧：仿真视图 + 配置区 + 滑块区 -->
+    <div>
+
+      <!-- Three.js 3D 仿真视图 -->
+      <div class="panel" style="margin-bottom: 20px;">
+        <div class="panel-header">
+          <div class="panel-title">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
+            </svg>
+            DH 正运动学 3D 仿真
+            <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--text-dim);font-size:11px;margin-left:8px;" id="sim3dArmName">SO-100</span>
+          </div>
+          <div class="panel-actions">
+            <button class="btn" id="btn3dReset" title="重置视角">⟳ 重置视角</button>
+          </div>
+        </div>
+
+        <div class="stream-canvas-wrap" id="sim3dWrap" style="height:420px;">
+          <div class="sim3d-wrap" id="sim3dInner">
+            <canvas id="canvas3d"></canvas>
+            <div class="sim3d-overlay" id="sim3dOverlay">
+              <div class="stream-spinner"></div>
+              <div style="margin-top:12px;">加载 Three.js 3D 场景...</div>
+            </div>
+            <div class="sim3d-overlay-tr" id="sim3dOverlayTR">
+              <div style="display:flex;align-items:center;gap:6px;">
+                <span id="sim3dFPS" style="color:var(--success);font-weight:700;">--</span>
+                <span style="color:var(--text-dim);">FPS</span>
+              </div>
+              <div class="sim3d-divider"></div>
+              <div style="display:flex;align-items:center;gap:6px;">
+                <span id="sim3dManiDot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--text-dim);"></span>
+                <span style="color:var(--text-dim);font-size:11px;">ManiSkill</span>
+              </div>
+              <div class="sim3d-divider"></div>
+              <div style="display:flex;align-items:center;gap:6px;">
+                <span style="color:var(--text-dim);">DOF</span>
+                <span id="sim3dDOF" style="color:var(--accent);font-weight:700;">3</span>
+              </div>
+            </div>
+            <div class="sim3d-overlay-bl" id="sim3dOverlayBL">
+              <button class="sim3d-btn" id="btnGrid" title="显示/隐藏地面网格" onclick="toggleGrid()">📐 网格</button>
+              <button class="sim3d-btn" id="btnAxes" title="显示/隐藏坐标系" onclick="toggleAxes()">🧭 轴</button>
+              <button class="sim3d-btn" id="btnFrames" title="显示/隐藏关节坐标系" onclick="toggleFrames()">⚙ DH帧</button>
+              <button class="sim3d-btn" id="btnLabels" title="显示/隐藏关节标签" onclick="toggleLabels()">🏷 标签</button>
+              <button class="sim3d-btn" id="btnCom" title="显示/隐藏质心" onclick="toggleCom()">⬤ 质心</button>
+              <button class="sim3d-btn" id="btnLinks" title="显示/隐藏连杆轮廓" onclick="toggleLinks()">◻ 轮廓</button>
+            </div>
+            <div class="sim3d-overlay-br" id="sim3dOverlayBR">
+              <span style="color:var(--text-dim);">拖拽旋转</span>
+              <span>·</span>
+              <span>滚轮缩放</span>
+              <span>·</span>
+              <span>右键平移</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="stream-toolbar">
+          <div class="stream-toolbar-left">
+            <span class="dot" id="sim3dDot" style="background:var(--text-dim);"></span>
+            <span id="sim3dStatus">3D 引擎就绪</span>
+          </div>
+          <div class="stream-toolbar-right">
+            <button class="stream-toggle" id="btnManiView" onclick="toggleManiView()" style="margin-right:8px;">📐 DH 编辑视图</button>
+            <button class="stream-toggle" id="btnSimMode" onclick="toggleSimMode()">🔄 跟随实时数据</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 机械臂配置面板 -->
+      <div class="panel" style="margin-bottom: 20px;">
+        <div class="panel-header">
+          <div class="panel-title">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+            </svg>
+            机械臂配置
+          </div>
+          <div style="display:flex;gap:8px;">
+            <button class="btn" onclick="loadArmConfig()">导入 JSON</button>
+            <label class="btn" style="cursor:pointer;display:inline-flex;align-items:center;">
+              📂 导入 URDF
+              <input type="file" accept=".urdf,.xml" id="urdfFileInput" style="display:none;" onchange="uploadUrdfFile(this.files[0])"/>
+            </label>
+            <button class="btn btn-primary" onclick="sendArmConfig()">发送配置</button>
+          </div>
+        </div>
+
+        <div style="padding: 16px 20px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+
+          <!-- 基础信息 -->
+          <div>
+            <div style="font-size:11px;font-weight:700;color:var(--text-secondary);letter-spacing:1.5px;text-transform:uppercase;margin-bottom:10px;">基本信息</div>
+            <div style="display:flex;flex-direction:column;gap:8px;">
+              <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-secondary);">
+                机械臂名称
+                <input id="cfg_arm_name" value="example" placeholder="例如: my_arm"
+                  style="flex:1;background:var(--bg-primary);border:1px solid var(--border);border-radius:6px;
+                         padding:4px 8px;color:var(--text-primary);font-size:12px;font-family:inherit;outline:none;
+                         transition:border-color 0.2s;"
+                  onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border)'"
+                  oninput="updateArmPreview()"/>
+              </label>
+              <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-secondary);">
+                自由度数量
+                <input id="cfg_dof" type="number" value="3" min="1" max="7"
+                  style="width:60px;background:var(--bg-primary);border:1px solid var(--border);border-radius:6px;
+                         padding:4px 8px;color:var(--text-primary);font-size:12px;font-family:inherit;outline:none;
+                         transition:border-color 0.2s;text-align:center;"
+                  onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border)'; syncAxisCount();"
+                  oninput="syncAxisCount();"/>
+              </label>
+            </div>
+          </div>
+
+          <!-- 重力设置已移除（JSON 中不包含此字段） -->
+
+        </div>
+
+        <!-- 各关节详细配置（按轴数动态生成） -->
+        <div style="padding: 0 20px 16px;">
+          <div style="font-size:11px;font-weight:700;color:var(--text-secondary);letter-spacing:1.5px;text-transform:uppercase;margin-bottom:10px;">
+            关节参数 <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--text-dim);font-size:10px;">（link mass / length / CoM / actuator mass）</span>
+          </div>
+          <div id="jointConfigContainer" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;"></div>
+        </div>
+      </div>
+
+      <!-- 关节控制滑块区已移除（与参数无关，3D 仿真使用默认 0 角度） -->
+    </div>
+
+    <!-- 右侧：状态栏 -->
+    <div class="sidebar">
+
+      <!-- 系统状态 -->
+      <div class="panel">
+        <div class="panel-header">
+          <div class="panel-title">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+            </svg>
+            系统状态
+          </div>
+        </div>
+        <div class="status-items">
+          <div class="status-item">
+            <span class="status-key">后端连接</span>
+            <span class="status-val offline" id="stBackend">离线</span>
+          </div>
+          <div class="status-item">
+            <span class="status-key">ROS 连接</span>
+            <span class="status-val offline" id="stRos">离线</span>
+          </div>
+          <div class="status-item">
+            <span class="status-key">机械臂就绪</span>
+            <span class="status-val offline" id="stArm">离线</span>
+          </div>
+          <div class="status-item">
+            <span class="status-key">最近更新</span>
+            <span class="status-val" id="stLastUpdate">--</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 指令历史已移除 -->
+
+      <!-- JSON 预览 -->
+      <div class="panel" style="flex: 0 0 auto;">
+        <div class="panel-header">
+          <div class="panel-title">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>
+            </svg>
+            实时 JSON
+          </div>
+          <button class="btn" onclick="copyArmConfigJson()">复制</button>
+        </div>
+        <div class="json-preview" id="jsonPreview" style="max-height: 720px; height: 720px; overflow-y: auto;"></div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="footer">
+    机械臂调试控制台 &nbsp;·&nbsp; ROS 兼容 &nbsp;·&nbsp; 重力补偿模式 &nbsp;·&nbsp; v1.0.0
+  </div>
+</div>
+
+<div class="toast-container" id="toastContainer"></div>
+
+<script>
+  // ── 配置 ────────────────────────────────────────────────────
+  // 暴露到 window，让 ES module（3D 仿真视图）也能读到
+  window.BACKEND_URL = 'http://localhost:5000';
+  window.WS_URL = 'ws://localhost:5000/ws';
+  const BACKEND_URL = window.BACKEND_URL;
+  const WS_URL = window.WS_URL;
+  const API_GET   = `${BACKEND_URL}/api/params`;
+  const API_POST  = `${BACKEND_URL}/api/params`;
+  const API_STATUS = `${BACKEND_URL}/api/status`;
+
+  // ── 全局状态 ────────────────────────────────────────────────
+  // 当前轴数（从 cfg_dof 输入框读取，默认 3 轴）
+  let activeAxisCount = (() => {
+    const el = document.getElementById('cfg_dof');
+    if (el && el.value) return parseInt(el.value) || 3;
+    return 3;
+  })();
+
+  // 当前角度（仅用于 3D 仿真显示，不参与 JSON 导出 / 不发送到后端）
+  let currentAngle = [0, 0, 0, 0, 0, 0, 0];
+  // 暴露给 ES module（3D 仿真视图）使用
+  window.currentAngle = currentAngle;
+  let ws              = null;
+  let wsConnected     = false;
+
+  // ── 机械臂配置面板 ──────────────────────────────────────────
+
+  // 各关节默认参数。对应 example.json 字段：
+  //   l -> length, d -> d, alpha -> twist, theta -> offset
+  // 内部存储仍用 length/d/twist/offset（与 DH 计算一致），仅导入/导出做命名转换。
+  const JOINT_CONFIG_DEFAULTS = [
+    { length: 0.18, d: 0.0, mass: 0.16, com: [0.0, 0.0, 0.0], actuator_mass: 0.055, type: 'axial',      twist: 1.5708, offset: 0.0 },
+    { length: 0.15, d: 0.0, mass: 0.12, com: [0.075, 0.0, 0.0], actuator_mass: 0.045, type: 'tangential', twist: 0.0,    offset: 0.0 },
+    { length: 0.10, d: 0.0, mass: 0.08, com: [0.05, 0.0, 0.0], actuator_mass: 0.035, type: 'tangential', twist: 0.0,    offset: 0.0 },
+    { length: 0.10, d: 0.0, mass: 0.08, com: [0.05, 0.0, 0.0], actuator_mass: 0.035, type: 'tangential', twist: 0.0,    offset: 0.0 },
+    { length: 0.08, d: 0.0, mass: 0.05, com: [0.04, 0.0, 0.0], actuator_mass: 0.025, type: 'tangential', twist: 0.0,    offset: 0.0 },
+    { length: 0.06, d: 0.0, mass: 0.03, com: [0.03, 0.0, 0.0], actuator_mass: 0.020, type: 'tangential', twist: 0.0,    offset: 0.0 },
+    { length: 0.05, d: 0.0, mass: 0.02, com: [0.025, 0.0, 0.0], actuator_mass: 0.015, type: 'tangential', twist: 0.0,    offset: 0.0 },
+  ];
+
+  let jointConfigs = JOINT_CONFIG_DEFAULTS.map(c => ({ ...c }));
+
+  function buildJointConfig() {
+    const container = document.getElementById('jointConfigContainer');
+    container.innerHTML = '';
+    const dof = parseInt(document.getElementById('cfg_dof').value) || 3;
+
+    for (let i = 0; i < dof; i++) {
+      const cfg = jointConfigs[i];
+      const card = document.createElement('div');
+      card.style.cssText = 'background:var(--bg-primary);border:1px solid var(--border);border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:8px;';
+      card.innerHTML = `
+        <div style="display:flex;align-items:center;justify-content:space-between;">
+          <span style="font-size:12px;font-weight:700;color:var(--accent);">关节${i + 1}</span>
+          <select id="jtype_${i}" onchange="updateJointType(${i}, this.value)"
+            style="font-size:11px;background:var(--bg-card);border:1px solid var(--border);border-radius:4px;
+                   padding:2px 6px;color:var(--text-secondary);font-family:inherit;cursor:pointer;">
+            <option value="axial" ${cfg.type==='axial'?'selected':''}>轴向 axial</option>
+            <option value="tangential" ${cfg.type==='tangential'?'selected':''}>切向 tangential</option>
+          </select>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;">
+          <label style="display:flex;flex-direction:column;gap:2px;font-size:10px;color:var(--text-secondary);">
+            质量 (kg)
+            <input id="jmass_${i}" type="number" step="0.001" value="${cfg.mass}" min="0"
+              style="background:var(--bg-card);border:1px solid var(--border);border-radius:4px;
+                     padding:6px 8px;color:var(--text-primary);font-size:12px;font-family:'Courier New',monospace;
+                     outline:none;width:100%;box-sizing:border-box;"
+              onchange="updateJointField(${i}, 'mass', this.value)"/>
+          </label>
+          <label style="display:flex;flex-direction:column;gap:2px;font-size:10px;color:var(--text-secondary);">
+            臂长 l (m)
+            <input id="jlen_${i}" type="number" step="0.001" value="${cfg.length ?? cfg.l ?? 0}" min="0"
+              style="background:var(--bg-card);border:1px solid var(--border);border-radius:4px;
+                     padding:6px 8px;color:var(--text-primary);font-size:12px;font-family:'Courier New',monospace;
+                     outline:none;width:100%;box-sizing:border-box;"
+              onchange="updateJointField(${i}, 'length', this.value)"/>
+          </label>
+          <label style="display:flex;flex-direction:column;gap:2px;font-size:10px;color:var(--text-secondary);">
+            偏移 d (m)
+            <input id="jd_${i}" type="number" step="0.001" value="${cfg.d ?? 0}"
+              style="background:var(--bg-card);border:1px solid var(--border);border-radius:4px;
+                     padding:6px 8px;color:var(--text-primary);font-size:12px;font-family:'Courier New',monospace;
+                     outline:none;width:100%;box-sizing:border-box;"
+              onchange="updateJointField(${i}, 'd', this.value)"/>
+          </label>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;">
+          <label style="display:flex;flex-direction:column;gap:2px;font-size:10px;color:var(--text-secondary);">
+            扭转角 alpha (rad)
+            <input id="jtwist_${i}" type="number" step="0.0001" value="${cfg.twist ?? cfg.alpha ?? 0}"
+              style="background:var(--bg-card);border:1px solid var(--border);border-radius:4px;
+                     padding:6px 8px;color:var(--text-primary);font-size:12px;font-family:'Courier New',monospace;
+                     outline:none;width:100%;box-sizing:border-box;"
+              onchange="updateJointField(${i}, 'twist', this.value)"/>
+          </label>
+          <label style="display:flex;flex-direction:column;gap:2px;font-size:10px;color:var(--text-secondary);">
+            零位偏移 theta (rad)
+            <input id="joff_${i}" type="number" step="0.0001" value="${cfg.offset ?? cfg.theta ?? 0}"
+              style="background:var(--bg-card);border:1px solid var(--border);border-radius:4px;
+                     padding:6px 8px;color:var(--text-primary);font-size:12px;font-family:'Courier New',monospace;
+                     outline:none;width:100%;box-sizing:border-box;"
+              onchange="updateJointField(${i}, 'offset', this.value)"/>
+          </label>
+          <label style="display:flex;flex-direction:column;gap:2px;font-size:10px;color:var(--text-secondary);">
+            执行器质量 (kg)
+            <input id="jact_${i}" type="number" step="0.001" value="${cfg.actuator_mass}" min="0"
+              style="background:var(--bg-card);border:1px solid var(--border);border-radius:4px;
+                     padding:6px 8px;color:var(--text-primary);font-size:12px;font-family:'Courier New',monospace;
+                     outline:none;width:100%;box-sizing:border-box;"
+              onchange="updateJointField(${i}, 'actuator_mass', this.value)"/>
+          </label>
+        </div>
+      `;
+      container.appendChild(card);
+    }
+  }
+
+  function updateJointField(i, field, val) {
+    jointConfigs[i][field] = parseFloat(val);
+    // 同步到 3D 视图
+    if (window.armJointConfigs && window.armJointConfigs[i] !== undefined) {
+      window.armJointConfigs[i][field] = parseFloat(val);
+      window.dispatchEvent(new CustomEvent('armConfigChanged'));
+    }
+    updateArmPreview();
+  }
+
+  function updateJointCom(i, axis, val) {
+    jointConfigs[i].com[axis] = parseFloat(val);
+    if (window.armJointConfigs && window.armJointConfigs[i] !== undefined) {
+      window.armJointConfigs[i].com[axis] = parseFloat(val);
+      window.dispatchEvent(new CustomEvent('armConfigChanged'));
+    }
+    updateArmPreview();
+  }
+
+  function updateJointType(i, val) {
+    jointConfigs[i].type = val;
+    if (window.armJointConfigs && window.armJointConfigs[i] !== undefined) {
+      window.armJointConfigs[i].type = val;
+      window.dispatchEvent(new CustomEvent('armConfigChanged'));
+    }
+    updateArmPreview();
+  }
+
+  function loadArmConfig() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json';
+    input.onchange = (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        try {
+          const data = JSON.parse(ev.target.result);
+          document.getElementById('cfg_arm_name').value = data.arm_name || 'example';
+          document.getElementById('cfg_dof').value = data.dof || 3;
+          if (data.joints) {
+            const keys = Object.keys(data.joints).sort();
+            for (let i = 0; i < keys.length && i < 7; i++) {
+              const j = data.joints[keys[i]];
+              const link = j.link || {};
+              jointConfigs[i] = {
+                type: j.type || 'tangential',
+                // v1 字段：l / d / alpha / theta（兼容 length / twist / offset）
+                length: link.l ?? link.length ?? 0.1,
+                d: link.d ?? 0.0,
+                twist: link.alpha ?? link.twist ?? 0.0,
+                offset: link.theta ?? link.offset ?? 0.0,
+                mass: link.mass ?? 0.1,
+                com: link.center_of_mass || [0.05, 0, 0],
+                actuator_mass: j.actuator_mass ?? 0.03,
+              };
+            }
+          }
+          buildJointConfig();
+          syncJointConfigsToWindow();
+          window.armAngles = [...currentAngle];
+          window.dispatchEvent(new CustomEvent('armConfigChanged'));
+          showToast('JSON 导入成功', 'success');
+        } catch (_) {
+          showToast('JSON 格式错误，请检查文件', 'error');
+        }
+      };
+      reader.readAsText(file);
+    };
+    input.click();
+  }
+
+    function buildArmConfigPayload() {
+    const arm_name = document.getElementById('cfg_arm_name').value || 'example';
+    const dof = parseInt(document.getElementById('cfg_dof').value) || 3;
+    const joints = {};
+    for (let i = 0; i < dof; i++) {
+      const cfg = jointConfigs[i] || JOINT_CONFIG_DEFAULTS[i];
+      joints[`joint${i + 1}`] = {
+        type: cfg.type,
+        link: {
+          l: cfg.length ?? 0,
+          d: cfg.d ?? 0,
+          alpha: cfg.twist ?? 0,
+          theta: cfg.offset ?? 0,
+          mass: cfg.mass ?? 0,
+          center_of_mass: Array.isArray(cfg.com) ? cfg.com : [0, 0, 0],
+        },
+        actuator_mass: cfg.actuator_mass ?? 0,
+      };
+    }
+    return {
+      arm_name,
+      units: { length: 'm', mass: 'kg' },
+      dof,
+      joints,
+    };
+  }
+
+  function sendArmConfig() {
+    const payload = buildArmConfigPayload();
+    const url = `${BACKEND_URL}/api/arm_config`;
+    console.log('[Arm Config] POST', url, payload);
+    fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }).then(r => {
+      console.log('[Arm Config] response', r.status, r.statusText);
+      return r.json().then(j => ({ ok: r.ok, status: r.status, j }));
+    }).then(({ ok, status, j }) => {
+      if (ok) {
+        showToast(`配置已发送 (dof=${j.dof}, arm=${j.arm_name})`, 'success');
+        if (typeof window.clearManiGroup === 'function') {
+          window.clearManiGroup();
+        }
+        if (window._maniState) {
+          window._maniState.meshesBuilt = false;
+          window._maniState.poseMap.clear();
+        }
+      } else {
+        showToast(`发送失败 (${status}): ${j.error || ''}`, 'error');
+      }
+    }).catch(err => {
+      console.error('[Arm Config] failed', err);
+      showToast(`后端未连接：${err.message || err}`, 'error');
+    });
+  }
+
+  function uploadUrdfFile(file) {
+    if (!file) return;
+    showToast(`正在上传 URDF: ${file.name}`, 'success');
+    const fd = new FormData();
+    fd.append('file', file);
+    const url = `${BACKEND_URL}/api/load_urdf`;
+    console.log('[LoadURDF] POST', url, file.name);
+    fetch(url, {
+      method: 'POST',
+      body: fd,
+    }).then(r => {
+      console.log('[LoadURDF] response', r.status, r.statusText);
+      return r.json().then(j => ({ ok: r.ok, status: r.status, j }));
+    }).then(({ ok, status, j }) => {
+      if (ok) {
+        showToast(`URDF 装载成功 dof=${j.dof}`, 'success');
+        if (typeof window.clearManiGroup === 'function') {
+          window.clearManiGroup();
+        }
+        if (window._maniState) {
+          window._maniState.meshesBuilt = false;
+          window._maniState.poseMap.clear();
+        }
+      } else {
+        showToast(`URDF 装载失败 (${status}): ${j.error || ''}`, 'error');
+      }
+    }).catch(err => {
+      console.error('[LoadURDF] failed', err);
+      showToast(`后端未连接：${err.message || err}`, 'error');
+    });
+    document.getElementById('urdfFileInput').value = '';
+  }
+  window.uploadUrdfFile = uploadUrdfFile;
+
+  // DOF 变化时重建关节配置卡片
+  // ── 轴数跟随机械臂配置 ───────────────────────────────────────
+  function buildAxisSelector() {
+    const dof = parseInt(document.getElementById('cfg_dof').value) || 3;
+    activeAxisCount = dof;
+  }
+
+  // cfg_dof 变化 → 重建关节配置卡片 + 更新轴数显示
+  function syncAxisCount() {
+    const dof = parseInt(document.getElementById('cfg_dof').value) || 3;
+    activeAxisCount = dof;
+    // 同步截断 jointConfigs 数组（避免 DOF 减小后仍渲染多余关节）
+    if (jointConfigs.length < dof) {
+      while (jointConfigs.length < dof) {
+        const i = jointConfigs.length;
+        jointConfigs.push({ ...JOINT_CONFIG_DEFAULTS[i] });
+      }
+    } else if (jointConfigs.length > dof) {
+      jointConfigs = jointConfigs.slice(0, dof);
+    }
+    while (currentAngle.length < dof) currentAngle.push(0);
+    currentAngle = currentAngle.slice(0, dof);
+    buildJointConfig();
+    syncJointConfigsToWindow();
+    window.armAngles = [...currentAngle];
+    window.dispatchEvent(new CustomEvent('armConfigChanged'));
+    updateArmPreview();
+  }
+
+  document.addEventListener('DOMContentLoaded', () => {
+    // 按 cfg_dof 初值截断数组，保持与 HTML 输入框一致
+    const initialDof = parseInt(document.getElementById('cfg_dof')?.value) || 3;
+    activeAxisCount = initialDof;
+    if (jointConfigs.length < initialDof) {
+      while (jointConfigs.length < initialDof) {
+        const i = jointConfigs.length;
+        jointConfigs.push({ ...JOINT_CONFIG_DEFAULTS[i] });
+      }
+    } else if (jointConfigs.length > initialDof) {
+      jointConfigs = jointConfigs.slice(0, initialDof);
+    }
+    currentAngle = currentAngle.slice(0, initialDof);
+    while (currentAngle.length < initialDof) currentAngle.push(0);
+
+    buildAxisSelector();
+    buildJointConfig();
+    // 初始化 3D 模块的共享状态
+    window.armDOF = activeAxisCount;
+    window.armAngles = [...currentAngle];
+    syncJointConfigsToWindow();
+    updateArmPreview();
+    tryConnect();
+  });
+
+  // 同步 jointConfigs 到 window.armJointConfigs（供 Three.js 模块使用）
+  function syncJointConfigsToWindow() {
+    window.armDOF = activeAxisCount;
+    window.armJointConfigs = jointConfigs.map(c => ({ ...c }));
+  }
+  // 3D 仿真视图使用 armAngles，初始为与 dof 一致长度的零数组。
+
+  // ── 机械臂配置 实时 JSON 预览 ──────────────────────────────
+  // 只显示 arm_config，严格按 example.json 的字段格式（l/d/alpha/theta）
+  function updateArmPreview() {
+    const arm_cfg = buildArmConfigPayload();
+    document.getElementById('jsonPreview').innerHTML = syntaxHighlight(JSON.stringify(arm_cfg, null, 2));
+  }
+
+  function copyArmConfigJson() {
+    const arm_cfg = buildArmConfigPayload();
+    navigator.clipboard.writeText(JSON.stringify(arm_cfg, null, 2)).then(() => {
+      showToast('JSON 已复制到剪贴板', 'success');
+    }).catch(() => {
+      showToast('复制失败', 'error');
+    });
+  }
+
+  function syntaxHighlight(json) {
+    return json
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"([^"]+)":/g, '<span class="json-key">"$1"</span>:')
+      .replace(/: (-?[\d.]+)/g, ': <span class="json-num">$1</span>')
+      .replace(/: "([^"]+)"/g, ': <span class="json-str">"$1"</span>');
+  }
+
+
+  // ── 后端连接（仅保留状态订阅，不发送 joint_* 控制参数；JSON 配置走 sendArmConfig） ─────
+  let sendDebounceTimer = null;
+
+  function tryConnect() {
+    setStatus('connecting');
+    tryConnectWS();
+    fetch(API_STATUS, { method: 'GET' })
+      .then(r => r.json())
+      .then(d => {
+        if (d.connected) {
+          setStatus('online');
+          updateStatus('backend', 'online');
+          if (d.ros_connected) updateStatus('ros', 'online');
+          if (d.arm_ready) updateStatus('arm', 'online');
+        }
+      })
+      .catch(() => { setStatus('demo'); });
+  }
+
+  function tryConnectWS() {
+    try {
+      ws = new WebSocket(WS_URL);
+      ws.onopen = () => {
+        wsConnected = true;
+        setStatus('online');
+        updateStatus('backend', 'online');
+        showToast('WebSocket 已连接 — 实时同步已启用', 'success');
+        ws.send(JSON.stringify({ type: 'subscribe', channels: ['params', 'status'] }));
+      };
+      ws.onmessage = (evt) => {
+        try {
+          const msg = JSON.parse(evt.data);
+          if (msg.type === 'mani_topology') {
+            if (typeof window.applyManiTopology === 'function') {
+              window.applyManiTopology(msg);
+            }
+            return;
+          }
+          if (msg.type === 'mani_link_poses') {
+            if (typeof window.handleManiLinkPoses === 'function') {
+              window.handleManiLinkPoses(msg);
+            }
+            return;
+          }
+          if (msg.type === 'video_frame' && msg.data) {
+            // 后端推过来的 ManiSkill 真实渲染帧（fallback 模式或可视化用）
+            // 现在已用 link_poses 实时渲染，不再单独处理
+            return;
+          }
+          // arm_state: 包含 target（滑块设定值）+ actual（机械臂实际反馈）
+          if (msg.type === 'arm_state' || msg.data) {
+            const payload = msg.data || msg;
+            if (payload.target)  applyTargetValues(payload.target);
+            if (payload.actual) applyActualValues(payload.actual);
+            window.dispatchEvent(new CustomEvent('arm_state_received', { detail: payload }));
+            updateArmPreview();
+            if (msg.ts) {
+              const t = document.getElementById('stLastUpdate');
+              if (t) t.textContent = new Date(msg.ts).toTimeString().slice(0, 8);
+            }
+          }
+        } catch (_) {}
+      };
+      ws.onclose = ws.onerror = () => {
+        wsConnected = false;
+        if (document.getElementById('connLabel').textContent !== '演示模式') {
+          setStatus('demo');
+        }
+      };
+    } catch (_) { setStatus('demo'); }
+  }
+
+  function toggleConnection() {
+    if (wsConnected) {
+      ws.close(); wsConnected = false;
+      setStatus('demo');
+      showToast('已断开 — 运行于演示模式', 'warning');
+    } else { tryConnect(); }
+  }
+
+  function setStatus(s) {
+    const badge = document.getElementById('connBadge');
+    const dot   = document.getElementById('statusDot');
+    const label = document.getElementById('connLabel');
+    badge.className = 'connection-badge';
+    if (s === 'online') {
+      badge.classList.add('connected');
+      dot.style.background = 'var(--success)';
+      dot.style.boxShadow = '0 0 8px var(--success)';
+      label.textContent = '已连接';
+    } else if (s === 'demo') {
+      dot.style.background = 'var(--warning)';
+      dot.style.boxShadow = '0 0 8px var(--warning)';
+      label.textContent = '演示模式';
+    } else {
+      dot.style.background = 'var(--text-dim)';
+      dot.style.boxShadow = 'none';
+      label.textContent = '连接中...';
+    }
+  }
+
+  function updateStatus(key, val) {
+    const el = document.getElementById('st' + key.charAt(0).toUpperCase() + key.slice(1));
+    if (!el) return;
+    el.textContent = val === 'online' ? '在线' : '离线';
+    el.className = 'status-val ' + (val === 'online' ? 'online' : 'offline');
+  }
+
+    // ── 同步机械臂反馈值（轴数同步保留；关节角度显示已移除） ────
+  function applyTargetValues(target) {
+    if (!target) return;
+    if (target.axis_count !== undefined) {
+      const n = Math.min(Math.max(target.axis_count, 1), 7);
+      if (n !== activeAxisCount) {
+        activeAxisCount = n;
+        buildAxisSelector();
+        buildJointConfig();
+        syncJointConfigsToWindow();
+      }
+    }
+    // joint_X* 数据仍可驱动 3D 仿真显示
+    for (const key in target) {
+      const info = parseKey(key);
+      if (!info) continue;
+      if (info.type === 'angle') currentAngle[info.idx] = target[key];
+    }
+    window.armAngles = [...currentAngle];
+    window.dispatchEvent(new CustomEvent('armConfigChanged'));
+  }
+
+  function applyActualValues(actual) {
+    if (!actual) return;
+    // 标记机械臂已连接（右侧状态灯变绿）
+    updateStatus('arm', 'online');
+  }
+
+  // 从 key 名解析出 type 和 idx（仅做 joint_X 解析）
+  function parseKey(key) {
+    const m1 = key.match(/^joint_(\d+)$/);
+    if (m1) return { type: 'angle', idx: parseInt(m1[1]) - 1 };
+    return null;
+  }
+
+  function showToast(msg, type = 'success') {
+    const c = document.getElementById('toastContainer');
+    const t = document.createElement('div');
+    t.className = `toast ${type}`;
+    const icon = type === 'success' ? '✓' : type === 'error' ? '✕' : '⚠';
+    t.innerHTML = `<span>${icon}</span> ${msg}`;
+    c.appendChild(t);
+    setTimeout(() => t.remove(), 3000);
+  }
+</script>
+
+<!-- ManiSkill 仿真视频流 — 从后端 /ws 拉 JPEG 帧 -->
+<script type="module">
+  window.BACKEND_URL = window.BACKEND_URL || 'http://localhost:5000';
+
+  // 旧的 ManiSkill 视频流代码已废弃（用 Three.js 3D 视图替代）。
+  // 保留空对象避免依赖它的代码报错。
+  const Stream = {
+    start: () => {},
+    stop: () => {},
+    resetEnv: () => {},
+    fetchSimStatus: () => {},
+  };
+
+  window.Stream = Stream;
+</script>
+
+<!-- Three.js 3D DH 机械臂仿真 -->
+<script>
+// ═══════════════════════════════════════════════════════════════════════════
+// ManiSkill 真物理视图的全局状态 — 必须在 init3D 之前定义，
+// 因为 sendArmConfig / uploadUrdfFile 等其他脚本块需要访问 window._maniState
+//═══════════════════════════════════════════════════════════════════════════
+const _maniState = {
+  topology: null,
+  poseMap: new Map(),
+  linkObjs: new Map(),
+  meshesBuilt: false,
+  lastTopoApplyMs: 0,
+  lastFrameMs: 0,
+  receivedCount: 0,
+  pendingMeshes: new Map(),  // link name -> {count, meshes[]}
+};
+window._maniState = _maniState;
+
+// STL Loader 实例
+let stlLoader = null;
+
+var maniGroup = null;
+var maniView = false;
+var armGroup = null;  // 真正赋值在 init3D 内（必须 THREE 加载完）
+// 暴露给 setManiViewEnabled 等不需要 THREE 早期用的函数
+// 注：armGroup 在 init3D 真正跑时会被赋值。setManiViewEnabled 通过这个 var 引用
+
+function clearManiGroup() {
+  if (window._maniState) window._maniState.linkObjs.clear();
+  if (window.maniGroup) {
+    while (window.maniGroup.children.length) {
+      window.maniGroup.remove(window.maniGroup.children[0]);
+    }
+  }
+}
+window.clearManiGroup = clearManiGroup;
+
+// ── 3D 几何构造：放在顶层确保 sendArmConfig/uploadUrdfFile 即刻可用 ──
+function makeShapeFromDescriptor(desc, linkName, baseUrl) {
+  let geom;
+  try {
+    if (desc.type === 'box') {
+      const hs = desc.size.half_size;
+      geom = new THREE.BoxGeometry(hs[0]*2, hs[1]*2, hs[2]*2);
+    } else if (desc.type === 'sphere') {
+      geom = new THREE.SphereGeometry(desc.size.radius, 16, 12);
+    } else if (desc.type === 'cylinder') {
+      geom = new THREE.CylinderGeometry(
+        desc.size.radius, desc.size.radius,
+        desc.size.half_length * 2, 16);
+    } else if (desc.type === 'capsule') {
+      geom = new THREE.CapsuleGeometry(
+        desc.size.radius, desc.size.half_length * 2, 4, 12);
+    } else if (desc.type === 'mesh') {
+      // mesh 类型会在 applyManiTopology 中异步处理，返回 null
+      return null;
+    } else {
+      return null;
+    }
+  } catch (e) {
+    console.error('[Mani] makeShapeFromDescriptor error:', e, desc);
+    return null;
+  }
+  const color = desc.color && desc.color.length >= 3
+    ? new THREE.Color(desc.color[0], desc.color[1], desc.color[2])
+    : new THREE.Color(0.8, 0.8, 0.85);
+  const mat = new THREE.MeshStandardMaterial({
+    color, metalness: 0.2, roughness: 0.6,
+  });
+  const mesh = new THREE.Mesh(geom, mat);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  const [px, py, pz] = desc.local_pose.p;
+  const [qw, qx, qy, qz] = desc.local_pose.q;
+  mesh.position.set(px, py, pz);
+  mesh.quaternion.set(qx, qy, qz, qw);
+  return mesh;
+}
+
+// 加载 mesh 几何
+function loadMeshDescriptor(desc, linkName, baseUrl) {
+  if (desc.type !== 'mesh') return Promise.resolve(null);
+  
+  // 获取 mesh 文件路径
+  const filename = desc.size.filename;
+  // baseUrl 是 URDF 文件的基础 URL，例如 /assets/so100/
+  const meshUrl = baseUrl + 'meshes/' + filename.replace('meshes/', '');
+  
+  console.log('[Mani] Loading mesh:', meshUrl);
+  
+  return new Promise((resolve, reject) => {
+    if (!stlLoader) {
+      stlLoader = new STLLoader();
+    }
+    
+    stlLoader.load(
+      meshUrl,
+      function(geometry) {
+        // 计算包围盒，调整几何体使其居中
+        geometry.computeBoundingBox();
+        geometry.computeVertexNormals();
+        
+        const color = desc.color && desc.color.length >= 3
+          ? new THREE.Color(desc.color[0], desc.color[1], desc.color[2])
+          : new THREE.Color(0.8, 0.8, 0.85);
+        
+        const mat = new THREE.MeshStandardMaterial({
+          color,
+          metalness: 0.2,
+          roughness: 0.6,
+        });
+        
+        const mesh = new THREE.Mesh(geometry, mat);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        
+        // 应用 local pose
+        const [px, py, pz] = desc.local_pose.p;
+        const [qw, qx, qy, qz] = desc.local_pose.q;
+        mesh.position.set(px, py, pz);
+        mesh.quaternion.set(qx, qy, qz, qw);
+        
+        console.log('[Mani] Mesh loaded:', linkName, filename, 
+          'bbox:', geometry.boundingBox ? 
+          `${geometry.boundingBox.min.x.toFixed(3)} to ${geometry.boundingBox.max.x.toFixed(3)}` : 'unknown');
+        
+        resolve(mesh);
+      },
+      function(progress) {
+        // Progress callback
+      },
+      function(error) {
+        console.error('[Mani] Mesh load error:', error, 'for', meshUrl);
+        reject(error);
+      }
+    );
+  });
+}
+
+function applyManiPoses() {
+  for (const [name, pose] of _maniState.poseMap.entries()) {
+    const lg = _maniState.linkObjs.get(name);
+    if (!lg) continue;
+    lg.position.set(pose.pos[0], pose.pos[1], pose.pos[2]);
+    const [qw, qx, qy, qz] = pose.quat;
+    lg.quaternion.set(qx, qy, qz, qw);
+  }
+}
+
+function applyManiTopology(topo) {
+  console.log('[Mani] applyManiTopology called, links=', topo?.links?.length);
+  _maniState.topology = topo;
+  clearManiGroup();
+  if (!topo || !topo.links) return;
+  if (!window.maniGroup) {
+    console.warn('[Mani] maniGroup not ready yet');
+    return;
+  }
+
+  // 获取 base URL 用于加载 mesh
+  // 假设 topo 包含 base_url，或者从前端状态获取
+  const baseUrl = topo.base_url || _maniState.lastBaseUrl || '/assets/so100/';
+  _maniState.lastBaseUrl = baseUrl;
+
+  let totalMeshes = 0;
+  let meshPromises = [];
+  
+  for (const linkDesc of topo.links) {
+    const linkGroup = new THREE.Group();
+    linkGroup.name = 'mani_link:' + linkDesc.name;
+    
+    for (const sh of (linkDesc.shapes || [])) {
+      if (sh.type === 'mesh') {
+        // 异步加载 mesh
+        const promise = loadMeshDescriptor(sh, linkDesc.name, baseUrl).then(mesh => {
+          if (mesh) {
+            linkGroup.add(mesh);
+            totalMeshes++;
+          }
+        }).catch(err => {
+          console.warn('[Mani] mesh load failed for', linkDesc.name, sh.size?.filename);
+        });
+        meshPromises.push(promise);
+      } else {
+        const mesh = makeShapeFromDescriptor(sh);
+        if (mesh) {
+          linkGroup.add(mesh);
+          totalMeshes++;
+        } else {
+          console.warn('[Mani] mesh create failed for', linkDesc.name, sh);
+        }
+      }
+    }
+    window.maniGroup.add(linkGroup);
+    _maniState.linkObjs.set(linkDesc.name, linkGroup);
+  }
+  
+  // 等待所有 mesh 加载完成后再显示
+  Promise.all(meshPromises).then(() => {
+    _maniState.meshesBuilt = true;
+    if (_maniState.poseMap.size > 0) applyManiPoses();
+    setManiViewEnabled(true);
+    const dot = document.getElementById('sim3dManiDot');
+    if (dot) dot.style.background = 'var(--success)';
+    
+    // 诊断：打印相机、renderer、maniGroup 在世界中的边界
+    try {
+      const bbox = new THREE.Box3().setFromObject(window.maniGroup);
+      const size = new THREE.Vector3(); bbox.getSize(size);
+      const center = new THREE.Vector3(); bbox.getCenter(center);
+      console.log('[Mani] bbox:', center.toArray().map(x=>x.toFixed(3)),
+                  'size:', size.toArray().map(x=>x.toFixed(3)));
+      
+      // 自动把 OrbitControls 的 target 移到 maniGroup 中心
+      if (size.length() < 1e-6 || !isFinite(size.x)) {
+        console.warn('[Mani] bbox is empty/degenerate, teleporting group to (0.4, 0.4, 0)');
+        window.maniGroup.position.set(0.4, 0.4, 0);
+      } else if (typeof controls !== 'undefined' && controls) {
+        const oldTarget = controls.target.clone();
+        controls.target.copy(center);
+        controls.update();
+        console.log('[Mani] auto-centered target to', center.toArray().map(x=>x.toFixed(3)));
+      }
+    } catch (e) {
+      console.error('[Mani] diagnostic error:', e);
+    }
+    
+    console.log('[Mani] topology 应用完成，links=', topo.links.length,
+                'meshes=', totalMeshes);
+  }).catch(err => {
+    console.error('[Mani] mesh loading error:', err);
+  });
+}
+
+function handleManiLinkPoses(msg) {
+  _maniState.receivedCount++;
+  _maniState.poseMap.clear();
+  for (const lk of (msg.links || [])) {
+    _maniState.poseMap.set(lk.name, { pos: lk.pos, quat: lk.quat });
+  }
+  if (_maniState.receivedCount <= 2) {
+    const firstLink = msg.links?.[0];
+    console.log('[Mani] poses #', _maniState.receivedCount,
+                'count=', msg.links?.length,
+                'first=', firstLink?.name, 'pos=', firstLink?.pos,
+                'meshesBuilt=', _maniState.meshesBuilt);
+  }
+  if (_maniState.receivedCount === 1 && _maniState.meshesBuilt) {
+    // 第一次收到 poses + mesh 已建好：诊断每个 linkGroup 的世界位置
+    setTimeout(() => {
+      try {
+        const lg0 = _maniState.linkObjs.get(msg.links?.[0]?.name);
+        if (lg0) {
+          const wp = new THREE.Vector3();
+          lg0.getWorldPosition(wp);
+          console.log('[Mani] linkGroup[0] world pos:', wp.toArray().map(x=>x.toFixed(3)),
+                      'lg[0].children=', lg0.children.length);
+        }
+        // 全局 bbox
+        const bbox = new THREE.Box3().setFromObject(window.maniGroup);
+        console.log('[Mani] group bbox min:', bbox.min.toArray().map(x=>x.toFixed(3)),
+                    'max:', bbox.max.toArray().map(x=>x.toFixed(3)));
+      } catch (e) { console.error(e); }
+    }, 100);
+  }
+  if (_maniState.meshesBuilt) applyManiPoses();
+}
+
+function setManiViewEnabled(on) {
+  maniView = !!on;
+  if (window.maniGroup) {
+    window.maniGroup.visible = maniView;
+  }
+  if (typeof armGroup !== 'undefined' && armGroup) {
+    armGroup.visible = !maniView;
+  }
+  const btn = document.getElementById('btnManiView');
+  if (btn) {
+    btn.textContent = maniView ? '🔬 ManiSkill 真物理' : '📐 DH 编辑视图';
+    btn.classList.toggle('on', maniView);
+  }
+  const statusEl = document.getElementById('sim3dStatus');
+  if (statusEl) {
+    statusEl.textContent = maniView
+      ? 'ManiSkill 真物理视图'
+      : '3D 引擎运行中';
+  }
+}
+
+function toggleManiView() { setManiViewEnabled(!maniView); }
+
+// 关键：立即挂到 window（不依赖 init3D）
+window.applyManiTopology = applyManiTopology;
+window.handleManiLinkPoses = handleManiLinkPoses;
+window.setManiViewEnabled = setManiViewEnabled;
+window.toggleManiView = toggleManiView;
+
+// 等待 THREE 加载完毕
+(function init3D() {
+  if (typeof THREE === 'undefined' || typeof THREE.OrbitControls === 'undefined') {
+    return setTimeout(init3D, 50);
+  }
+
+  // 全局错误捕获
+  window.addEventListener('error', (e) => {
+    const overlay = document.getElementById('sim3dOverlay');
+    if (overlay) {
+      overlay.innerHTML = '<div style="color:#ff4757;font-size:13px;max-width:80%;text-align:center;">' +
+        '<b>3D 初始化失败</b><br><br>' +
+        '<code style="color:#fcd34d;font-size:11px;">' +
+        (e.message || String(e.error)).replace(/</g, '&lt;') +
+        '</code></div>';
+    }
+  });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DH 正运动学引擎
+console.log('[3D] init3D started, THREE =', typeof THREE, 'OrbitControls =', typeof THREE.OrbitControls);
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * 标准 DH 参数表（按关节顺序）：
+ *   θ_i = joint_angle_i + offset_i    （关节角度 + 零位偏移）
+ *   d_i = 0                           （连杆偏距，固定值，固定臂 d=0）
+ *   a_i = length_i                    （连杆长度）
+ *   α_i = twist_i                     （扭转角）
+ *
+ * 第 i 个齐次变换矩阵：
+ *   T_i = Rz(θ_i) · Tz(d_i) · Tx(a_i) · Rx(α_i)
+ *       = [ cosθ  -sinθ  0  a_i·cosθ ]
+ *         [ sinθ   cosθ  0  a_i·sinθ ]
+ *         [   0      0   1     d_i    ]
+ *         [   0      0   0      1     ]
+ *
+ * 其中  cos(θ+α) 和 sin(θ+α) 用 Rodrigues 旋转公式展开：
+ *   cos(θ+α) = cosθ·cosα - sinθ·sinα
+ *   sin(θ+α) = sinθ·cosα + cosθ·sinα
+ * 简化后得到：a_i*cos(θ+α) = length_i·(cosθ·cosα - sinθ·sinα)
+ */
+function dhTransform(length, twist, offset, angle) {
+  const ct = Math.cos(angle + offset);
+  const st = Math.sin(angle + offset);
+  const ca = Math.cos(twist);
+  const sa = Math.sin(twist);
+  // 标准 DH：T = Rz(θ) · Tx(a) · Rx(α)
+  //   x = a·(cosα·cosθ - sinα·sinθ) = a·cos(θ+α)
+  //   y = a·(cosα·sinθ + sinα·cosθ) = a·sin(θ+α)
+  //   z = 0
+  return {
+    position: new THREE.Vector3(
+      length * (ct * ca - st * sa),
+      length * (st * ca + ct * sa),
+      0
+    ),
+    // Z 轴（关节轴）：先 Rx(α) 再 Rz(θ)
+    zAxis: new THREE.Vector3(0, 0, 1)
+      .applyAxisAngle(new THREE.Vector3(1, 0, 0), twist)
+      .applyAxisAngle(new THREE.Vector3(0, 0, 1), angle + offset)
+      .normalize(),
+    // X 轴（连杆指向轴）：先 Rx(α) 再 Rz(θ)
+    xAxis: new THREE.Vector3(1, 0, 0)
+      .applyAxisAngle(new THREE.Vector3(1, 0, 0), twist)
+      .applyAxisAngle(new THREE.Vector3(0, 0, 1), angle + offset)
+      .normalize(),
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Three.js 场景初始化
+// ═══════════════════════════════════════════════════════════════════════════
+
+const canvas = document.getElementById('canvas3d');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.2;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x020408);
+scene.fog = new THREE.FogExp2(0x020408, 0.06);
+
+const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 100);
+camera.position.set(2.2, 1.5, 2.2);
+camera.lookAt(0.4, 0.4, 0);
+
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.target.set(0, 0.3, 0);
+controls.minDistance = 0.3;
+controls.maxDistance = 6;
+controls.maxPolarAngle = Math.PI * 0.9;
+controls.update();
+
+// ── 灯光 ───────────────────────────────────────────────────────────────────
+const ambientLight = new THREE.AmbientLight(0x334455, 1.5);
+scene.add(ambientLight);
+
+const dirLight = new THREE.DirectionalLight(0xffffff, 2.5);
+dirLight.position.set(3, 5, 3);
+dirLight.castShadow = true;
+dirLight.shadow.mapSize.set(2048, 2048);
+dirLight.shadow.camera.near = 0.1;
+dirLight.shadow.camera.far = 20;
+dirLight.shadow.camera.left = dirLight.shadow.camera.bottom = -2;
+dirLight.shadow.camera.right = dirLight.shadow.camera.top = 2;
+dirLight.shadow.bias = -0.001;
+scene.add(dirLight);
+
+const rimLight = new THREE.DirectionalLight(0x00e5ff, 0.8);
+rimLight.position.set(-3, 2, -2);
+scene.add(rimLight);
+
+const fillLight = new THREE.DirectionalLight(0xff9100, 0.3);
+fillLight.position.set(-1, 1, 3);
+scene.add(fillLight);
+
+// ── 地面网格 ───────────────────────────────────────────────────────────────
+const gridHelper = new THREE.GridHelper(2, 20, 0x1a2a40, 0x0d1825);
+gridHelper.position.y = 0;
+scene.add(gridHelper);
+
+// 地面实体（接收阴影）
+const groundGeo = new THREE.PlaneGeometry(4, 4);
+const groundMat = new THREE.MeshStandardMaterial({
+  color: 0x030810, roughness: 0.9, metalness: 0.1,
+});
+const ground = new THREE.Mesh(groundGeo, groundMat);
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+// ── 世界坐标系 ────────────────────────────────────────────────────────────
+const worldAxesGroup = new THREE.Group();
+const xArrow = new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 0, 0), 0.25, 0xff4757, 0.04, 0.025);
+const yArrow = new THREE.ArrowHelper(new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 0), 0.25, 0x2ed573, 0.04, 0.025);
+const zArrow = new THREE.ArrowHelper(new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 0, 0), 0.25, 0x00e5ff, 0.04, 0.025);
+worldAxesGroup.add(xArrow, yArrow, zArrow);
+scene.add(worldAxesGroup);
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 3D 机械臂构建
+// ═══════════════════════════════════════════════════════════════════════════
+
+// 视觉辅助开关
+const vizState = {
+  grid: true,
+  axes: true,
+  frames: true,
+  labels: true,
+  com: true,
+  links: true,
+};
+
+// 场景元素引用（每次重建）
+// armGroup 在脚本顶层 var 已声明；这里创建实例（要 THREE 已加载）
+armGroup = new THREE.Group();
+window.__armGroup = armGroup;
+scene.add(armGroup);
+
+let frameHelpers = [];   // [THREE.AxesHelper] 
+let labelSprites = [];   // [THREE.Sprite]
+let comMarkers = [];     // [THREE.Mesh]
+let linkOutlines = [];   // [THREE.Line]
+let jointMeshes = [];    // [THREE.Mesh]
+let linkMeshes = [];     // [THREE.Mesh]
+let endEffector = null;
+let baseMesh = null;
+let gripperGroup = null;
+
+// 贴图：白色圆形（关节用）
+const spriteCtx = document.createElement('canvas');
+spriteCtx.width = spriteCtx.height = 64;
+const s2d = spriteCtx.getContext('2d');
+s2d.beginPath();
+s2d.arc(32, 32, 30, 0, Math.PI * 2);
+s2d.fillStyle = '#00e5ff';
+s2d.fill();
+s2d.beginPath();
+s2d.arc(32, 32, 14, 0, Math.PI * 2);
+s2d.fillStyle = '#020408';
+s2d.fill();
+const jointTexture = new THREE.CanvasTexture(spriteCtx);
+
+function makeJointSprite(r, g, b) {
+  const c = document.createElement('canvas');
+  c.width = c.height = 64;
+  const cx = c.getContext('2d');
+  cx.beginPath();
+  cx.arc(32, 32, 30, 0, Math.PI * 2);
+  cx.fillStyle = `rgb(${r},${g},${b})`;
+  cx.fill();
+  cx.beginPath();
+  cx.arc(32, 32, 13, 0, Math.PI * 2);
+  cx.fillStyle = '#020408';
+  cx.fill();
+  const tex = new THREE.CanvasTexture(c);
+  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false });
+  const sp = new THREE.Sprite(mat);
+  sp.scale.setScalar(0.07);
+  return sp;
+}
+
+// 关节颜色（按索引）
+const JOINT_COLORS = [0x00e5ff, 0xff9100, 0x2ed573, 0xff6b81, 0xfeca57, 0x54a0ff, 0xa29bfe];
+const LINK_COLOR = new THREE.Color(0x1a2a40);
+const LINK_EDGE_COLOR = new THREE.Color(0x0091a1);
+const BASE_COLOR = new THREE.Color(0x1a2a40);
+const FRAME_COLORS = [0xff4757, 0x2ed573, 0x00e5ff];
+
+// ── 质心标记球 ────────────────────────────────────────────────────────────
+function makeComMarker(pos, comLocal, radius) {
+  const geo = new THREE.SphereGeometry(radius, 12, 12);
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0xff9100, emissive: 0xff9100, emissiveIntensity: 0.5,
+    roughness: 0.3, metalness: 0.6,
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.copy(pos).add(comLocal);
+  mesh.castShadow = true;
+  return mesh;
+}
+
+// ── 连杆轮廓线 ────────────────────────────────────────────────────────────
+function makeLinkOutline(p0, p1, color) {
+  const points = [p0.clone(), p1.clone()];
+  const geo = new THREE.BufferGeometry().setFromPoints(points);
+  const mat = new THREE.LineBasicMaterial({ color, linewidth: 2 });
+  return new THREE.Line(geo, mat);
+}
+
+// ── 关节标签精灵 ──────────────────────────────────────────────────────────
+function makeLabel(text, color) {
+  const c = document.createElement('canvas');
+  c.width = 256; c.height = 64;
+  const cx = c.getContext('2d');
+  cx.clearRect(0, 0, 256, 64);
+  cx.font = 'bold 28px "Courier New", monospace';
+  cx.fillStyle = '#' + color.toString(16).padStart(6, '0');
+  cx.fillText(text, 8, 42);
+  cx.strokeStyle = '#020408';
+  cx.lineWidth = 4;
+  cx.strokeText(text, 8, 42);
+  cx.fillText(text, 8, 42);
+  const tex = new THREE.CanvasTexture(c);
+  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false });
+  const sp = new THREE.Sprite(mat);
+  sp.scale.set(0.3, 0.075, 1);
+  return sp;
+}
+
+// ── 底座平台 ──────────────────────────────────────────────────────────────
+function buildBase(parent) {
+  const g = new THREE.Group();
+  // 底板
+  const basePlate = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.18, 0.20, 0.05, 32),
+    new THREE.MeshStandardMaterial({ color: BASE_COLOR, roughness: 0.5, metalness: 0.5 })
+  );
+  basePlate.position.y = 0.025;
+  basePlate.castShadow = true; basePlate.receiveShadow = true;
+  g.add(basePlate);
+  // 旋转柱
+  const pillar = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.06, 0.08, 0.10, 16),
+    new THREE.MeshStandardMaterial({ color: 0x0091a1, roughness: 0.3, metalness: 0.7 })
+  );
+  pillar.position.y = 0.10;
+  pillar.castShadow = true;
+  g.add(pillar);
+  // 装饰环
+  const ring = new THREE.Mesh(
+    new THREE.TorusGeometry(0.08, 0.012, 8, 32),
+    new THREE.MeshStandardMaterial({ color: 0x00e5ff, emissive: 0x00e5ff, emissiveIntensity: 0.4, roughness: 0.2, metalness: 0.8 })
+  );
+  ring.position.y = 0.15;
+  ring.rotation.x = Math.PI / 2;
+  g.add(ring);
+  parent.add(g);
+  return g;
+}
+
+// ── 连杆（两关节间） ────────────────────────────────────────────────────────
+function buildLink(parent, p0, p1, twist, isLast) {
+  const dir = new THREE.Vector3().subVectors(p1, p0);
+  const len = dir.length();
+  if (len < 0.001) return;
+
+  // CylinderGeometry 默认沿 Y 轴。只要把 group 的局部 Y 轴旋转到 dir 方向即可。
+  const yAxis = new THREE.Vector3(0, 1, 0);
+  const dirN = dir.clone().normalize();
+  const q = new THREE.Quaternion().setFromUnitVectors(yAxis, dirN);
+
+  const g = new THREE.Group();
+  g.position.copy(p0);
+  g.quaternion.copy(q);
+
+  // 连杆体（细长柱，CylinderGeometry 沿 Y 轴 0~linkLen）
+  const linkLen = len - 0.04;
+  if (linkLen > 0.005) {
+    const body = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.022, 0.028, linkLen, 8),
+      new THREE.MeshStandardMaterial({
+        color: isLast ? 0x0091a1 : LINK_COLOR,
+        roughness: 0.4, metalness: 0.6,
+      })
+    );
+    body.position.y = linkLen / 2;
+    body.castShadow = true;
+    g.add(body);
+
+    if (vizState.links) {
+      const edges = new THREE.LineSegments(
+        new THREE.EdgesGeometry(new THREE.CylinderGeometry(0.022, 0.028, linkLen, 8)),
+        new THREE.LineBasicMaterial({ color: LINK_EDGE_COLOR, transparent: true, opacity: 0.6 })
+      );
+      edges.position.y = linkLen / 2;
+      g.add(edges);
+    }
+  }
+
+  parent.add(g);
+  linkMeshes.push(g);
+  return g;
+}
+
+// ── 关节球 + DH 坐标系 ─────────────────────────────────────────────────────
+function buildJoint(parent, pos, jointIdx, angle, twist, offset, isFirst) {
+  const col = JOINT_COLORS[jointIdx % JOINT_COLORS.length];
+  const g = new THREE.Group();
+  g.position.copy(pos);
+  parent.add(g);
+
+  // 关节本体（根据类型不同形状）
+  let jointMat = new THREE.MeshStandardMaterial({
+    color: col, emissive: col, emissiveIntensity: 0.25,
+    roughness: 0.3, metalness: 0.7,
+  });
+
+  let jmesh;
+  if (isFirst) {
+    // 第一关节：旋转台
+    jmesh = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 0.04, 32), jointMat);
+    jmesh.position.y = 0.02;
+  } else {
+    // 其他关节：球
+    jmesh = new THREE.Mesh(new THREE.SphereGeometry(0.038, 20, 20), jointMat);
+  }
+  jmesh.castShadow = true;
+  g.add(jmesh);
+  jointMeshes.push(jmesh);
+
+  // 关节装饰圈
+  const ring = new THREE.Mesh(
+    new THREE.TorusGeometry(0.042, 0.006, 8, 32),
+    new THREE.MeshStandardMaterial({ color: col, emissive: col, emissiveIntensity: 0.6, roughness: 0.2, metalness: 0.9 })
+  );
+  ring.rotation.x = Math.PI / 2;
+  g.add(ring);
+
+  // DH 坐标系（每个关节局部坐标系）
+  if (vizState.frames) {
+    const axesSize = 0.08;
+    const fh = new THREE.AxesHelper(axesSize);
+    // 应用 DH 变换中的扭转角
+    fh.rotation.x = twist;
+    g.add(fh);
+    frameHelpers.push(fh);
+  }
+
+  // 关节标签
+  if (vizState.labels) {
+    const label = makeLabel(`J${jointIdx + 1}`, col);
+    label.position.set(0.06, 0.06, 0);
+    g.add(label);
+    labelSprites.push(label);
+  }
+
+  return g;
+}
+
+// ── 末端执行器 ─────────────────────────────────────────────────────────────
+function buildEndEffector(parent, pos, alignQuat) {
+  const g = new THREE.Group();
+  g.position.copy(pos);
+  if (alignQuat) g.quaternion.copy(alignQuat);
+  parent.add(g);
+
+  // 三指夹爪
+  const fingers = [
+    { angle: 0 },
+    { angle: (Math.PI * 2) / 3 },
+    { angle: (Math.PI * 4) / 3 },
+  ];
+  fingers.forEach(f => {
+    const fg = new THREE.Group();
+    fg.rotation.z = f.angle;
+    fg.rotation.x = -0.3;
+    const fmesh = new THREE.Mesh(
+      new THREE.BoxGeometry(0.01, 0.09, 0.012),
+      new THREE.MeshStandardMaterial({ color: 0xff9100, roughness: 0.3, metalness: 0.6 })
+    );
+    fmesh.position.set(0, 0.055, 0);
+    fmesh.castShadow = true;
+    fg.add(fmesh);
+    g.add(fg);
+  });
+
+  // 末端标记
+  const tip = new THREE.Mesh(
+    new THREE.OctahedronGeometry(0.025, 0),
+    new THREE.MeshStandardMaterial({ color: 0xff9100, emissive: 0xff9100, emissiveIntensity: 0.8, roughness: 0.2, metalness: 0.8 })
+  );
+  g.add(tip);
+
+  parent.add(g);
+  endEffector = g;
+  return g;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 重建机械臂（核心函数，任何参数变化时调用）
+// ═══════════════════════════════════════════════════════════════════════════
+
+function rebuildArm(jointConfigs, angles) {
+  // 清除旧臂
+  while (armGroup.children.length) armGroup.remove(armGroup.children[0]);
+  frameHelpers = []; labelSprites = []; comMarkers = []; linkOutlines = []; jointMeshes = []; linkMeshes = [];
+
+  const dof = Math.min(jointConfigs.length, angles.length);
+  // 防御：若 lengths 不一致（用户改了 DOF 但 configs 没补齐），按 dof 截断
+  jointConfigs = jointConfigs.slice(0, dof);
+  angles = angles.slice(0, dof);
+
+  // 计算每个关节的世界位置（累积 DH 变换）
+  const jointWorldPositions = [new THREE.Vector3(0, 0.10, 0)]; // 底座顶面为第一个关节原点
+  const jointRotations = [new THREE.Quaternion()]; // 累积旋转
+
+  for (let i = 0; i < dof; i++) {
+    const cfg = jointConfigs[i];
+    const angle = angles[i] !== undefined ? angles[i] : 0;
+    const { position, zAxis, xAxis } = dhTransform(cfg.length, cfg.twist, cfg.offset, angle);
+
+    const parentPos = jointWorldPositions[i];
+    const parentRot = jointRotations[i];
+
+    // 世界位置 = 父位置 + 父旋转 * 局部偏移
+    const worldPos = parentPos.clone().add(position.clone().applyQuaternion(parentRot));
+    jointWorldPositions.push(worldPos);
+
+    // 累积旋转（先应用 DH 的 Z 轴旋转，再应用扭转）
+    const qZ = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), angle + cfg.offset);
+    const qX = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), cfg.twist);
+    const localQ = qZ.multiply(qX);
+    const worldQ = parentRot.clone().multiply(localQ);
+    jointRotations.push(worldQ);
+  }
+
+  console.log('[3D] rebuildArm dof =', dof,
+    'jointConfigs.length =', jointConfigs.length,
+    'angles =', angles.map(a => a.toFixed(3)),
+    'firstPos =', jointWorldPositions[0].toArray().map(v => v.toFixed(3)),
+    'lastPos =', dof > 0 ? jointWorldPositions[dof].toArray().map(v => v.toFixed(3)) : 'n/a',
+    'joints =', jointWorldPositions.map(p => p.toArray().map(v => v.toFixed(2))));
+
+  // 底座
+  baseMesh = buildBase(armGroup);
+
+  // 连杆
+  for (let i = 0; i < dof; i++) {
+    const p0 = jointWorldPositions[i];
+    const p1 = jointWorldPositions[i + 1];
+    buildLink(armGroup, p0, p1, jointConfigs[i].twist, i === dof - 1);
+  }
+
+  // 关节球 + DH 坐标系
+  for (let i = 0; i < dof; i++) {
+    buildJoint(armGroup, jointWorldPositions[i], i,
+      angles[i] || 0, jointConfigs[i].twist, jointConfigs[i].offset, i === 0);
+  }
+
+  // 末端执行器
+  if (dof > 0) {
+    // 对齐到最后一个连杆的姿态：Y 轴朝末端方向延伸
+    const lastPos = jointWorldPositions[dof];
+    const prevPos = jointWorldPositions[dof - 1];
+    const dir = new THREE.Vector3().subVectors(lastPos, prevPos).normalize();
+    const yAxis = new THREE.Vector3(0, 1, 0);
+    const endQ = new THREE.Quaternion().setFromUnitVectors(yAxis, dir);
+    buildEndEffector(armGroup, lastPos, endQ);
+  }
+
+  // 质心标记
+  if (vizState.com) {
+    for (let i = 0; i < dof; i++) {
+      const cfg = jointConfigs[i];
+      const angle = angles[i] || 0;
+      const { position } = dhTransform(cfg.length, cfg.twist, cfg.offset, angle);
+      const p0 = jointWorldPositions[i];
+      const r = jointRotations[i];
+      const comLocal = new THREE.Vector3(cfg.com[0], cfg.com[1], cfg.com[2]).applyQuaternion(r);
+      const marker = makeComMarker(p0, comLocal, 0.018);
+      armGroup.add(marker);
+      comMarkers.push(marker);
+    }
+  }
+
+  // 连杆轮廓线
+  if (vizState.links) {
+    for (let i = 0; i < dof; i++) {
+      const ol = makeLinkOutline(jointWorldPositions[i], jointWorldPositions[i + 1], LINK_EDGE_COLOR);
+      armGroup.add(ol);
+      linkOutlines.push(ol);
+    }
+  }
+
+  // 更新辅助可见性
+  updateVizState();
+}
+
+function updateVizState() {
+  gridHelper.visible = vizState.grid;
+  worldAxesGroup.visible = vizState.axes;
+  frameHelpers.forEach(f => { f.visible = vizState.frames; });
+  labelSprites.forEach(l => { l.visible = vizState.labels; });
+  comMarkers.forEach(m => { m.visible = vizState.com; });
+  linkOutlines.forEach(l => { l.visible = vizState.links; });
+
+  // 更新按钮状态
+  ['btnGrid', 'btnAxes', 'btnFrames', 'btnLabels', 'btnCom', 'btnLinks'].forEach(id => {
+    const btn = document.getElementById(id);
+    if (!btn) return;
+    const key = id.replace('btn', '').toLowerCase();
+    if (key === 'dof') return;
+    const map = { grid: 'grid', axes: 'axes', frames: 'frames', labels: 'labels', com: 'com', links: 'links' };
+    if (vizState[map[key]]) btn.classList.add('on');
+    else btn.classList.remove('on');
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 工具函数（暴露到 window，供 HTML 按钮调用）
+// ═══════════════════════════════════════════════════════════════════════════
+
+function toggleGrid()    { vizState.grid   = !vizState.grid;   updateVizState(); }
+function toggleAxes()    { vizState.axes   = !vizState.axes;   updateVizState(); }
+function toggleFrames()  { vizState.frames = !vizState.frames; updateVizState(); }
+function toggleLabels()  { vizState.labels = !vizState.labels; updateVizState(); }
+function toggleCom()     { vizState.com    = !vizState.com;   updateVizState(); }
+function toggleLinks()   { vizState.links  = !vizState.links; updateVizState(); }
+
+window.toggleGrid   = toggleGrid;
+window.toggleAxes   = toggleAxes;
+window.toggleFrames = toggleFrames;
+window.toggleLabels = toggleLabels;
+window.toggleCom    = toggleCom;
+window.toggleLinks  = toggleLinks;
+
+// 监听 HTML 滑块变化 → 实时重建机械臂
+window.addEventListener('armConfigChanged', () => {
+  const dof = window.armDOF || 3;
+  rebuildArm(window.armJointConfigs || [], window.armAngles || []);
+  document.getElementById('sim3dDOF').textContent = dof;
+});
+
+// ── 实时更新（从 WebSocket 角度数据驱动）────────────────────────────────────
+let simModeLive = true; // 默认跟随实时数据
+
+function toggleSimMode() {
+  simModeLive = !simModeLive;
+  const btn = document.getElementById('btnSimMode');
+  btn.textContent = simModeLive ? '🔄 跟随实时数据' : '🔒 跟随滑块';
+  btn.classList.toggle('on', !simModeLive);
+}
+window.toggleSimMode = toggleSimMode;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ManiSkill 真物理渲染层
+// （makeShapeFromDescriptor / applyManiTopology / applyManiPoses / setManiViewEnabled /
+//  toggleManiView / handleManiLinkPoses 已在脚本开头定义 + 挂到 window）
+// 这里只做 maniGroup 实际挂到 scene 上（THREE 加载好后）
+//═══════════════════════════════════════════════════════════════════════════
+
+maniGroup = new THREE.Group();
+maniGroup.name = 'maniGroup';
+maniGroup.visible = false;
+scene.add(maniGroup);
+window.maniGroup = maniGroup;
+// 暴露场景对象到 window 以便 ManiSkill 回调等外部代码诊断/访问
+window.scene = scene;
+window.camera = camera;
+window.renderer = renderer;
+window.controls = controls;
+window.armGroup = armGroup;
+window.worldAxesGroup = worldAxesGroup;
+
+// ── 窗口大小调整 ───────────────────────────────────────────────────────────
+const wrap = document.getElementById('sim3dWrap');
+function resizeRenderer() {
+  const w = wrap.clientWidth;
+  const h = wrap.clientHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+const ro = new ResizeObserver(resizeRenderer);
+ro.observe(wrap);
+
+// 首次布局
+setTimeout(resizeRenderer, 100);
+
+// ── 渲染循环 ───────────────────────────────────────────────────────────────
+let lastTime = performance.now();
+let frameCount = 0;
+let fpsTimer = performance.now();
+
+// 关节高亮动画（实时变化时）
+let highlightTimer = 0;
+
+function animate() {
+  requestAnimationFrame(animate);
+  const now = performance.now();
+  const delta = (now - lastTime) / 1000;
+  lastTime = now;
+
+  // FPS 计数
+  frameCount++;
+  if (now - fpsTimer >= 1000) {
+    const fpsEl = document.getElementById('sim3dFPS');
+    if (fpsEl) fpsEl.textContent = frameCount;
+    frameCount = 0;
+    fpsTimer = now;
+  }
+
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+
+// ── 重置视角按钮 ──────────────────────────────────────────────────────────
+document.getElementById('btn3dReset').addEventListener('click', () => {
+  camera.position.set(2.2, 1.5, 2.2);
+  controls.target.set(0.4, 0.4, 0);
+  controls.update();
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 与主脚本集成：监听滑块和配置变化 → 驱动 3D 渲染
+// ═══════════════════════════════════════════════════════════════════════════
+
+// 监听配置区参数变化（twist / length / offset / type / com 等）
+  const jointConfigContainer = document.getElementById('jointConfigContainer');
+  if (jointConfigContainer) {
+    jointConfigContainer.addEventListener('input', () => {
+      syncJointConfigsFromUI();
+      window.dispatchEvent(new CustomEvent('armConfigChanged'));
+    });
+    jointConfigContainer.addEventListener('change', () => {
+      syncJointConfigsFromUI();
+      window.dispatchEvent(new CustomEvent('armConfigChanged'));
+    });
+  }
+
+  // WebSocket 实时数据
+  window.addEventListener('wsArmStateUpdate', (e) => {
+    if (simModeLive && e.detail && e.detail.actual) {
+      // 后端返回的 actual 角度直接驱动 3D（绿色高亮）
+      const actual = e.detail.actual;
+      const newAngles = window.armAngles ? [...window.armAngles] : [0, 0, 0, 0, 0, 0, 0];
+      let changed = false;
+      for (let i = 0; i < 7; i++) {
+        const key = `joint_${i + 1}`;
+        if (actual[key] !== undefined) {
+          const rad = actual[key] * Math.PI / 180;
+          if (Math.abs(rad - newAngles[i]) > 0.0001) {
+            newAngles[i] = rad;
+            changed = true;
+          }
+        }
+      }
+      if (changed) {
+        window.armAngles = newAngles;
+        window.dispatchEvent(new CustomEvent('armConfigChanged'));
+      }
+    }
+  });
+
+  // ── 从 UI 字段同步关节配置到 window.armJointConfigs ────────────────────────
+function syncJointConfigsFromUI() {
+  const dof = parseInt(document.getElementById('cfg_dof')?.value) || 3;
+  window.armDOF = dof;
+  const configs = [];
+  for (let i = 0; i < dof; i++) {
+    configs.push({
+      type: document.getElementById(`jtype_${i}`)?.value || 'tangential',
+      length: parseFloat(document.getElementById(`jlen_${i}`)?.value) || 0.1,
+      mass: parseFloat(document.getElementById(`jmass_${i}`)?.value) || 0.1,
+      com: [
+        parseFloat(document.getElementById(`jcomx_${i}`)?.value) || 0,
+        parseFloat(document.getElementById(`jcomy_${i}`)?.value) || 0,
+        parseFloat(document.getElementById(`jcomz_${i}`)?.value) || 0,
+      ],
+      actuator_mass: parseFloat(document.getElementById(`jact_${i}`)?.value) || 0.03,
+      twist: parseFloat(document.getElementById(`jtwist_${i}`)?.value) || 0,
+      offset: parseFloat(document.getElementById(`joff_${i}`)?.value) || 0,
+    });
+  }
+  window.armJointConfigs = configs;
+
+  // arm_name
+  const nameEl = document.getElementById('sim3dArmName');
+  if (nameEl) nameEl.textContent = (document.getElementById('cfg_arm_name')?.value || 'SO-100');
+}
+
+// ── 首次构建：等主脚本的 DOMContentLoaded 完成后同步并渲染 ─────────────────
+function waitForConfigsAndBuild() {
+  const check = () => {
+    if (window.armJointConfigs && window.armJointConfigs.length > 0) {
+      if (!window.armAngles || window.armAngles.length === 0) {
+        window.armAngles = [0, 0, 0, 0, 0, 0, 0];
+      }
+      rebuildArm(window.armJointConfigs, window.armAngles);
+      const overlay = document.getElementById('sim3dOverlay');
+      if (overlay) overlay.classList.add('hidden');
+      const dot = document.getElementById('sim3dDot');
+      if (dot) { dot.style.background = 'var(--success)'; dot.style.boxShadow = '0 0 8px var(--success)'; }
+      const statusEl = document.getElementById('sim3dStatus');
+      if (statusEl) statusEl.textContent = '3D 引擎运行中';
+    } else {
+      setTimeout(check, 100);
+    }
+  };
+  check();
+}
+waitForConfigsAndBuild();
+
+window.waitForConfigsAndBuild = waitForConfigsAndBuild;
+
+// 监听 DOM 重建（机械臂配置卡片重建时重新同步）
+const observer = new MutationObserver(() => {
+  if (window.armJointConfigs && window.armAngles) {
+    rebuildArm(window.armJointConfigs, window.armAngles);
+  }
+});
+const configEl = document.getElementById('jointConfigContainer');
+if (configEl) observer.observe(configEl, { childList: true, subtree: true });
+
+// ── 主动触发 WebSocket 实时数据到 3D ──────────────────────────────────────
+const _origWSHandler = window._wsArmStateHandler;
+window.addEventListener('arm_state_received', (e) => {
+  if (simModeLive) {
+    window.dispatchEvent(new CustomEvent('wsArmStateUpdate', { detail: e.detail }));
+  }
+});
+
+})(); // 结束 init3D IIFE
+</script>
+
+</body>
+</html>
+</html>
