@@ -1,0 +1,18 @@
+flask==3.0.0
+flask-cors==4.0.0
+# asgiref.WsgiToAsgi 把 Flask(WSGI) 包成 ASGI，让顶层 ASGI dispatcher
+# 能在 HTTP 路径上把请求转给 Flask，同时原生 WebSocket 路径(/ws)走我们自己写的 handler。
+asgiref>=3.7.0
+simple-websocket>=1.0.0
+uvicorn==0.27.0
+# ManiSkill 仿真推流依赖
+opencv-python>=4.8.0
+numpy>=1.24.0
+
+# ManiSkill 核心依赖（需要单独安装，参考 src/simulation/README.md）：
+#   pip install --upgrade mani_skill
+#   pip install torch           (或 torch GPU 版本)
+#   需配置 Vulkan 驱动，参考：https://maniskill.readthedocs.io/en/latest/
+#
+# 不再依赖 python-socketio / python-engineio：
+# 前端用浏览器原生 WebSocket，后端在顶层 ASGI 应用里手写 WS handler。

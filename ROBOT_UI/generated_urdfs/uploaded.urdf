@@ -1,0 +1,165 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  two_axis_arm.urdf
+  ==================
+  从 ROBOT_UI/example.json 自动生成的 2-DOF 机械臂 URDF。
+
+  参数完全对齐 example.json：
+    joint1: axial      l=0.0   d=0.08  alpha=π/2  theta=0   mass=0.16  com=[0,0,0.04]  actuator_mass=0.055
+    joint2: tangential l=0.15  d=0.0   alpha=0     theta=π/2 mass=0.12  com=[0.075,0,0]  actuator_mass=0.045
+
+  说明：
+    - 关节名用 joint_1 / joint_2（与 server.py 转 ROS 的命名一致）
+    - 关节类型全部 revolute
+    - 关节轴方向：joint_1 绕基座 Z（axial = 轴向旋转），joint_2 在水平面内俯仰
+    - 末端加一个 wrist_tip link（固定关节），便于 ManiSkill 取 tcp 位姿
+    - 转动惯量用细杆公式近似：I_xx=I_yy=m*l²/12, I_zz=0（仅用于仿真，数值精度要求不高）
+-->
+<robot name="two_axis_arm">
+
+  <!-- ============== 材质 ============== -->
+  <material name="arm_white">
+    <color rgba="0.95 0.95 0.95 1" />
+  </material>
+  <material name="arm_motor">
+    <color rgba="0.05 0.05 0.05 1" />
+  </material>
+  <material name="tip_red">
+    <color rgba="1.0 0.2 0.2 1" />
+  </material>
+
+  <!-- ============== 固定基座（与 world 固连；fix_root_link=True 时作为根 link） ============== -->
+  <link name="base_link">
+    <inertial>
+      <!-- 基座假设小，惯性张量近似为零 -->
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.001"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.04" length="0.02"/>
+      </geometry>
+      <material name="arm_motor"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.04" length="0.02"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- ===================================================== -->
+  <!-- joint_1（对应 example.json joint1，axial）              -->
+  <!-- DH: l=0, d=0.08, alpha=π/2, theta=0                     -->
+  <!-- 几何解释：绕基座 Z 轴的轴向旋转，关节沿 Z 偏距 0.08m    -->
+  <!-- ===================================================== -->
+  <joint name="joint_1" type="revolute">
+    <parent link="base_link"/>
+    <child  link="link_1"/>
+    <!-- 关节原点位于基座上方 d=0.08m，扭转 alpha=π/2 让 link1 转到水平方向 -->
+    <origin xyz="0 0 0.08" rpy="0 1.5708 0"/>
+    <axis  xyz="0 0 1"/>
+    <limit lower="-3.14159" upper="3.14159" effort="100" velocity="3.0"/>
+  </joint>
+
+  <link name="link_1">
+    <inertial>
+      <!-- 质量、质心来自 example.json joint1.link -->
+      <origin xyz="0.0 0.0 0.04" rpy="0 0 0"/>
+      <mass value="0.16"/>
+      <!-- 细杆近似：以质心为中心，0.08m 长的杆 -->
+      <inertia ixx="0.0000853" ixy="0" ixz="0"
+               iyy="0.0000853" iyz="0"
+               izz="0.000001"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <!-- 代表 joint1 的连杆（小立柱）- 从关节原点延伸到上一关节 -->
+        <cylinder radius="0.025" length="0.16"/>
+      </geometry>
+      <material name="arm_white"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.025" length="0.16"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- ===================================================== -->
+  <!-- joint_2（对应 example.json joint2，tangential）         -->
+  <!-- DH: l=0.15, d=0.0, alpha=0, theta=π/2                  -->
+  <!-- 几何解释：在水平面内做切向俯仰，杆长 0.15m              -->
+  <!-- ===================================================== -->
+  <joint name="joint_2" type="revolute">
+    <parent link="link_1"/>
+    <child  link="link_2"/>
+    <!-- 沿 link_1 末端（alpha 旋转后的 x 方向）伸出 l=0.15m；
+         theta=π/2 让 link_2 初始姿态为水平 -->
+    <origin xyz="0.15 0 0" rpy="0 0 1.5708"/>
+    <axis  xyz="0 0 1"/>
+    <limit lower="-3.14159" upper="3.14159" effort="100" velocity="3.0"/>
+  </joint>
+
+  <link name="link_2">
+    <inertial>
+      <!-- 质量、质心来自 example.json joint2.link -->
+      <origin xyz="0.075 0.0 0.0" rpy="0 0 0"/>
+      <mass value="0.12"/>
+      <!-- 细杆近似：以质心为中心，0.15m 长的杆 -->
+      <inertia ixx="0.000225" ixy="0" ixz="0"
+               iyy="0.000225" iyz="0"
+               izz="0.000001"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <!-- 代表 joint2 的连杆（水平杆）- 从关节位置延伸到下一关节 -->
+        <box size="0.30 0.02 0.02"/>
+      </geometry>
+      <material name="arm_white"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.30 0.02 0.02"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- ===================================================== -->
+  <!-- 末端 tip（fixed joint，方便 ManiSkill 取 tcp）          -->
+  <!-- ===================================================== -->
+  <joint name="wrist_tip_joint" type="fixed">
+    <parent link="link_2"/>
+    <child  link="wrist_tip"/>
+    <origin xyz="0.15 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <link name="wrist_tip">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.001"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.012"/>
+      </geometry>
+      <material name="tip_red"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.012"/>
+      </geometry>
+    </collision>
+  </link>
+
+</robot>
