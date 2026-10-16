@@ -3,6 +3,7 @@
 Servo 到 RealMan 的遥操作控制节点
 功能：订阅 /servo_angles 话题，控制 RealMan 机械臂跟随运动
 架构：参考 servo2xarm.py 的简洁设计
+说明：角度映射后直接输出，不做平滑滤波（由速度限幅保证安全）
 """
 
 import rospy
@@ -20,28 +21,23 @@ class ServoToRealMan:
         
         # ====== 参数配置 ======
         self.dof = rospy.get_param("~dof", 6)
-        self.control_rate = rospy.get_param("~control_rate", 1000.0)  # Hz
-        self.max_joint_speed = rospy.get_param("~max_joint_speed", 30.0)  # 度/秒
+        self.control_rate = rospy.get_param("~control_rate", 100.0)  # Hz
+        self.max_joint_speed = rospy.get_param("~max_joint_speed", 1000.0)  # 度/秒 不进行限制
         
         # RealMan 初始姿态（零点姿态）
         self.init_qpos_deg = rospy.get_param("~init_qpos", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         
         # 关节映射参数（缩放和方向）
-        self.joint_scale = np.array(rospy.get_param("~joint_scale", [0.015] * 6))
-        self.joint_invert = np.array(rospy.get_param("~joint_invert", [1.0, 1.0, 1.0, -1.0, 1.0, 1.0]))
-        
+        self.joint_scale = np.array(rospy.get_param("~joint_scale", [0.020] * 6))
+        self.joint_invert = np.array(rospy.get_param("~joint_invert", [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0]))
+          
         # 夹爪参数
         self.gripper_range = 1000
         self.gripper_min_deg = -10.0
         self.gripper_max_deg = 30.0
         
-        # 平滑滤波系数
-        self.filter_alpha = rospy.get_param("~filter_alpha", 0.3)
-        
         # ====== 状态变量 ======
         self.servo_angles = [0.0] * 7  # 从 /servo_angles 接收到的数据
-        self.target_joints = np.array(self.init_qpos_deg, dtype=np.float32)
-        self.smoothed_joints = np.array(self.init_qpos_deg, dtype=np.float32)
         self.last_joint_cmd = np.array(self.init_qpos_deg, dtype=np.float32)
         self.gripper_position = 0
         
@@ -76,17 +72,11 @@ class ServoToRealMan:
         处理 Servo 数据，转换为 RealMan 目标角度
         映射公式: target = init_qpos + servo_offset * scale * invert
         """
-        # 计算目标角度（带缩放和方向）
+        # 计算目标角度（带缩放和方向），不做滤波，直接输出
         new_angles = np.array(self.init_qpos_deg, dtype=np.float32)
         for i in range(min(self.dof, 6)):
             offset = self.servo_angles[i] * self.joint_scale[i] * self.joint_invert[i]
             new_angles[i] = self.init_qpos_deg[i] + offset
-        
-        # 低通平滑滤波
-        self.smoothed_joints = (
-            self.filter_alpha * new_angles + 
-            (1 - self.filter_alpha) * self.smoothed_joints
-        )
         
         # 映射夹爪位置
         gripper_deg = self.servo_angles[6] if len(self.servo_angles) > 6 else 0
@@ -94,7 +84,7 @@ class ServoToRealMan:
         gripper_norm = np.clip(gripper_norm, 0.0, 1.0)
         self.gripper_position = int(gripper_norm * self.gripper_range)
         
-        return self.smoothed_joints.copy(), self.gripper_position
+        return new_angles, self.gripper_position
     
     def apply_velocity_limit(self, desired_angles):
         """应用速度限制，防止关节运动过快"""

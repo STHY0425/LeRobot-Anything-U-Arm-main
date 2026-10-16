@@ -272,7 +272,7 @@ def reset_all_servos_to_center():
     try:
         control = open_manager(SERIAL_PORT, BAUD_RATE)
         
-        center_angle = 135.0
+        center_angle = 0.0
         move_velocity = 50  # °/s，缓慢移动
         
         print("\n正在复位...")
