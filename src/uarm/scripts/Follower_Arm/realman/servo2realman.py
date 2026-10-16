@@ -3,7 +3,7 @@
 Servo 到 RealMan 的遥操作控制节点
 功能：订阅 /servo_angles 话题，控制 RealMan 机械臂跟随运动
 架构：参考 servo2xarm.py 的简洁设计
-说明：角度映射后直接输出，不做平滑滤波（由速度限幅保证安全）
+说明：角度映射后直接输出，不做平滑滤波
 """
 
 import rospy
